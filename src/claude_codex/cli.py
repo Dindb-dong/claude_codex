@@ -478,7 +478,7 @@ def command_doctor(_: argparse.Namespace) -> int:
         failed = True
     if failed:
         return 1
-    print("ccx doctor: all required commands found")
+    print("ccx doctor: all required commands found and Claude auth is ready")
     return 0
 
 

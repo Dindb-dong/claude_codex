@@ -1724,8 +1724,10 @@ def print_doctor_status() -> None:
     else:
         print(f"[!!] claude auth: {auth_check.error}")
         print("     Run `claude`, execute `/login`, then retry `ccx`.")
-    if all(checks.values()):
-        print("ccx doctor: all required commands found")
+    if all(checks.values()) and auth_check.logged_in:
+        print("ccx doctor: all required commands found and Claude auth is ready")
+    elif all(checks.values()):
+        print("ccx doctor: all required commands found; Claude auth is not ready")
 
 
 def handle_slash_command(raw_command: str, repo: Path) -> str | None:
