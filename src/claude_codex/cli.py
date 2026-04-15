@@ -586,10 +586,58 @@ def command_handoff(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_run(args: argparse.Namespace) -> int:
+    """Launch the interactive Claude + Codex orchestration flow.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    from claude_codex.runner import RunConfig, run_orchestration
+
+    request = " ".join(args.request).strip()
+    if not request:
+        try:
+            request = input("ccx> ").strip()
+        except EOFError as exc:
+            raise CliError("request is required when stdin is not interactive") from exc
+    if not request:
+        raise CliError("request is required")
+    config = RunConfig(
+        repo=Path(args.repo).expanduser().resolve(),
+        request=request,
+        claude_model=args.claude_model,
+        claude_effort=args.claude_effort,
+        codex_model=args.codex_model,
+        codex_effort=args.codex_effort,
+        requested_workers=args.workers,
+        dry_run=args.dry_run,
+        skip_launch=args.skip_launch,
+        force_state=args.force_state,
+    )
+    return run_orchestration(config)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(prog="claude-codex")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
+
+    run_parser = subparsers.add_parser("run", help="launch interactive cmux orchestration")
+    run_parser.add_argument("request", nargs="*")
+    run_parser.add_argument("--repo", default=".")
+    run_parser.add_argument("--claude-model", default="opus")
+    run_parser.add_argument("--claude-effort", default="medium")
+    run_parser.add_argument("--codex-model", default="gpt-5.3-codex")
+    run_parser.add_argument("--codex-effort", default="medium")
+    run_parser.add_argument("--workers", type=positive_int)
+    run_parser.add_argument("--dry-run", action="store_true", help="print Claude plan only")
+    run_parser.add_argument("--skip-launch", action="store_true", help="skip cmux launch")
+    run_parser.add_argument(
+        "--force-state",
+        action="store_true",
+        help="overwrite existing .orchestrator files",
+    )
+    run_parser.set_defaults(func=command_run)
 
     init_parser = subparsers.add_parser("init", help="initialize orchestration state")
     init_parser.add_argument("target_repo")
@@ -679,8 +727,22 @@ def main(argv: list[str] | None = None) -> int:
     Args:
         argv: Optional argument vector, excluding executable name.
     """
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        from claude_codex.runner import interactive_default
+
+        try:
+            return interactive_default(Path.cwd())
+        except CliError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 2
     try:
         return args.func(args)
     except CliError as exc:
