@@ -575,6 +575,9 @@ def parse_json_object(raw_output: str) -> dict[str, Any]:
         value = json.loads(raw_output[start : end + 1])
     if not isinstance(value, dict):
         raise CliError("Claude plan was not a JSON object")
+    structured_output = value.get("structured_output")
+    if isinstance(structured_output, dict):
+        return structured_output
     return value
 
 
@@ -602,6 +605,8 @@ def request_plan(config: RunConfig) -> dict[str, Any]:
     command = [
         "claude",
         "--print",
+        "--output-format",
+        "json",
         "--model",
         config.claude_model,
         "--effort",
@@ -632,6 +637,9 @@ def request_plan(config: RunConfig) -> dict[str, Any]:
     if process.returncode != 0:
         preview = (stderr or stdout).strip()[:1200] or "(empty output)"
         raise CliError(f"Claude planner CLI failed with exit {process.returncode}:\n{preview}")
+    if not stdout.strip():
+        preview = stderr.strip()[:1200] or "(empty stdout and stderr)"
+        raise CliError(f"Claude planner returned no stdout. Stderr preview:\n{preview}")
     print("ccx: Claude planner response received.", flush=True)
     print("ccx: parsing Claude planner JSON...", flush=True)
     plan = parse_json_object(stdout)

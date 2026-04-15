@@ -523,6 +523,86 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(check.auth_method, "none")
         self.assertEqual(check.api_provider, "firstParty")
 
+    def test_parse_json_object_extracts_structured_output(self) -> None:
+        """Claude --output-format json nests JSON schema results under structured_output."""
+        from claude_codex.runner import parse_json_object
+
+        raw_output = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "",
+                "structured_output": {
+                    "summary": "Update UI",
+                    "worker_count": 1,
+                    "tasks": [{"title": "UI update"}],
+                },
+            }
+        )
+
+        plan = parse_json_object(raw_output)
+
+        self.assertEqual(plan["summary"], "Update UI")
+        self.assertEqual(plan["worker_count"], 1)
+
+    def test_request_plan_uses_json_output_format(self) -> None:
+        """Structured planner calls request Claude's JSON wrapper output."""
+        from claude_codex.runner import RunConfig, request_plan
+
+        captured_command: list[str] = []
+
+        class FakeProcess:
+            """Minimal process stub for Claude planner subprocess."""
+
+            returncode = 0
+
+            def communicate(self, timeout: int) -> tuple[str, str]:
+                output = json.dumps(
+                    {
+                        "structured_output": {
+                            "summary": "Update UI",
+                            "worker_count": 1,
+                            "tasks": [
+                                {
+                                    "title": "UI update",
+                                    "objective": "Implement it.",
+                                    "owned_scope": ["src"],
+                                    "non_goals": [],
+                                    "required_tests": [],
+                                }
+                            ],
+                        }
+                    }
+                )
+                return output, ""
+
+        def fake_popen(command: list[str], **_: object) -> FakeProcess:
+            captured_command.extend(command)
+            return FakeProcess()
+
+        config = RunConfig(
+            repo=self.repo,
+            request="make the UI cleaner",
+            claude_model="opus",
+            claude_effort="medium",
+            codex_model="gpt-5.3-codex",
+            codex_effort="medium",
+            requested_workers=1,
+            dry_run=True,
+            skip_launch=False,
+            force_state=False,
+        )
+
+        with (
+            patch("claude_codex.runner.collect_repo_snapshot", return_value="Repository snapshot"),
+            patch("claude_codex.runner.subprocess.Popen", side_effect=fake_popen),
+        ):
+            plan = request_plan(config)
+
+        self.assertEqual(plan["summary"], "Update UI")
+        self.assertIn("--output-format", captured_command)
+        self.assertIn("json", captured_command)
+
 
 if __name__ == "__main__":
     unittest.main()
