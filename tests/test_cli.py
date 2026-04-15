@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -215,6 +217,26 @@ class CliTestCase(unittest.TestCase):
             exit_code = self.run_cli("run", "--repo", str(self.repo))
 
         self.assertEqual(exit_code, 1)
+
+    def test_default_prompt_interrupt_exits_cleanly(self) -> None:
+        """Ctrl-C at the default prompt exits without a traceback."""
+        stderr = StringIO()
+
+        with patch("builtins.input", side_effect=KeyboardInterrupt), redirect_stderr(stderr):
+            exit_code = self.run_cli()
+
+        self.assertEqual(exit_code, 130)
+        self.assertIn("interrupted", stderr.getvalue())
+
+    def test_run_prompt_interrupt_exits_cleanly(self) -> None:
+        """Ctrl-C at the run prompt exits without a traceback."""
+        stderr = StringIO()
+
+        with patch("builtins.input", side_effect=KeyboardInterrupt), redirect_stderr(stderr):
+            exit_code = self.run_cli("run", "--repo", str(self.repo))
+
+        self.assertEqual(exit_code, 130)
+        self.assertIn("interrupted", stderr.getvalue())
 
     def test_run_skip_launch_uses_run_scoped_state(self) -> None:
         """run --skip-launch writes run-scoped state under .ccx/runs."""

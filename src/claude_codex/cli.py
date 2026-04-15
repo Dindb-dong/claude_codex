@@ -875,6 +875,9 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             return interactive_default(Path.cwd())
+        except KeyboardInterrupt:
+            print("\ninterrupted", file=sys.stderr)
+            return 130
         except CliError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -886,6 +889,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.func(args)
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
     except CliError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
