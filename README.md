@@ -38,27 +38,28 @@ Install a global local command:
 
 ```bash
 ln -sfn /Users/maxkim/claude_codex/scripts/claude-codex ~/.local/bin/claude-codex
+ln -sfn /Users/maxkim/claude_codex/scripts/claude-codex ~/.local/bin/ccx
 ```
 
-After that, `claude-codex` works from any directory as long as `~/.local/bin` is in `PATH`.
+After that, `claude-codex` and the shorter `ccx` alias work from any directory as long as `~/.local/bin` is in `PATH`.
 
 Initialize orchestration state in a target git repository:
 
 ```bash
 cd /Users/maxkim/claude_codex
-claude-codex init /path/to/target-repo feature-name 3
+ccx init /path/to/target-repo feature-name 3
 ```
 
 Check status:
 
 ```bash
-claude-codex status /path/to/target-repo
+ccx status /path/to/target-repo
 ```
 
 Workers write validation files before implementation:
 
 ```bash
-claude-codex validation /path/to/target-repo worker-01 \
+ccx validation /path/to/target-repo worker-01 \
   --scope-coherence "Scope is coherent." \
   --overlap-check "No overlap with other workers." \
   --recommendation approve
@@ -67,14 +68,14 @@ claude-codex validation /path/to/target-repo worker-01 \
 Claude writes the approval barrier only after validations are complete and questions are resolved:
 
 ```bash
-claude-codex approve /path/to/target-repo
-claude-codex check-barrier /path/to/target-repo
+ccx approve /path/to/target-repo
+ccx check-barrier /path/to/target-repo
 ```
 
 Workers write handoffs when finished:
 
 ```bash
-claude-codex handoff /path/to/target-repo worker-01 \
+ccx handoff /path/to/target-repo worker-01 \
   --branch worker/feature-area \
   --worktree /path/to/worktree \
   --summary "Implemented assigned task." \
@@ -96,6 +97,8 @@ claude-codex approve <target-repo> [--force]
 claude-codex check-barrier <target-repo>
 claude-codex handoff <target-repo> <worker-id> ...
 ```
+
+`ccx` is an equivalent short alias for every command above.
 
 ## Safety Rules
 
