@@ -812,7 +812,10 @@ def prompt_for_request() -> str:
     """Prompt the user for the implementation request."""
     print("ccx interactive orchestrator")
     print("Describe what you want Claude to plan and Codex workers to implement.")
-    return input("ccx> ").strip()
+    try:
+        return input("ccx> ").strip()
+    except EOFError as exc:
+        raise CliError("request is required when stdin is not interactive") from exc
 
 
 def interactive_default(cwd: Path) -> int:

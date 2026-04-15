@@ -199,6 +199,13 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertFalse((self.repo / ".orchestrator").exists())
 
+    def test_run_without_request_handles_noninteractive_stdin(self) -> None:
+        """run without a request fails cleanly when stdin cannot provide one."""
+        with patch("builtins.input", side_effect=EOFError):
+            exit_code = self.run_cli("run", "--repo", str(self.repo))
+
+        self.assertEqual(exit_code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -596,7 +596,10 @@ def command_run(args: argparse.Namespace) -> int:
 
     request = " ".join(args.request).strip()
     if not request:
-        request = input("ccx> ").strip()
+        try:
+            request = input("ccx> ").strip()
+        except EOFError as exc:
+            raise CliError("request is required when stdin is not interactive") from exc
     if not request:
         raise CliError("request is required")
     config = RunConfig(
