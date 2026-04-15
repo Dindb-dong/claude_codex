@@ -410,6 +410,31 @@ def command_stop(args: argparse.Namespace) -> int:
     return stop_runtime(resolve_repo(args.target_repo), close_cmux=args.close_cmux, run_id=args.run)
 
 
+def command_agent(args: argparse.Namespace) -> int:
+    """Run a Claude or Codex agent through the ccx interrupt wrapper.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    from claude_codex.runner import run_agent_wrapper
+
+    child_command = list(args.child_command)
+    if child_command and child_command[0] == "--":
+        child_command = child_command[1:]
+    if args.role == "worker" and not args.worker_id:
+        raise CliError("--worker-id is required for worker agents")
+    if args.role == "conductor" and args.worker_id:
+        raise CliError("--worker-id is only valid for worker agents")
+    return run_agent_wrapper(
+        repo=resolve_repo(args.repo),
+        run_id=args.run,
+        role=args.role,
+        worker_id=args.worker_id,
+        prompt_path=Path(args.prompt).expanduser().resolve(),
+        child_command=child_command,
+    )
+
+
 def command_install_claude_commands(_: argparse.Namespace) -> int:
     """Install ccx Claude Code slash commands.
 
@@ -754,6 +779,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="also close the recorded cmux workspace",
     )
     stop_parser.set_defaults(func=command_stop)
+
+    agent_parser = subparsers.add_parser(
+        "agent",
+        help="run a launched agent with ccx signal handling",
+    )
+    agent_parser.add_argument("--repo", required=True)
+    agent_parser.add_argument("--run", required=True, help="run id to stop on interrupt")
+    agent_parser.add_argument("--role", choices=["conductor", "worker"], required=True)
+    agent_parser.add_argument("--worker-id", type=validate_worker_id)
+    agent_parser.add_argument("--prompt", required=True, help="prompt file to append to child")
+    agent_parser.add_argument("child_command", nargs=argparse.REMAINDER)
+    agent_parser.set_defaults(func=command_agent)
 
     barrier_parser = subparsers.add_parser("check-barrier", help="check approval barrier")
     barrier_parser.add_argument("target_repo")
