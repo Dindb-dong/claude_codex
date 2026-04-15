@@ -34,23 +34,31 @@ Reduce expensive Claude execution loops by using Claude only for planning, arbit
 
 ## Quick Start
 
+Install a global local command:
+
+```bash
+ln -sfn /Users/maxkim/claude_codex/scripts/claude-codex ~/.local/bin/claude-codex
+```
+
+After that, `claude-codex` works from any directory as long as `~/.local/bin` is in `PATH`.
+
 Initialize orchestration state in a target git repository:
 
 ```bash
 cd /Users/maxkim/claude_codex
-./scripts/claude-codex init /path/to/target-repo feature-name 3
+claude-codex init /path/to/target-repo feature-name 3
 ```
 
 Check status:
 
 ```bash
-./scripts/claude-codex status /path/to/target-repo
+claude-codex status /path/to/target-repo
 ```
 
 Workers write validation files before implementation:
 
 ```bash
-./scripts/claude-codex validation /path/to/target-repo worker-01 \
+claude-codex validation /path/to/target-repo worker-01 \
   --scope-coherence "Scope is coherent." \
   --overlap-check "No overlap with other workers." \
   --recommendation approve
@@ -59,14 +67,14 @@ Workers write validation files before implementation:
 Claude writes the approval barrier only after validations are complete and questions are resolved:
 
 ```bash
-./scripts/claude-codex approve /path/to/target-repo
-./scripts/claude-codex check-barrier /path/to/target-repo
+claude-codex approve /path/to/target-repo
+claude-codex check-barrier /path/to/target-repo
 ```
 
 Workers write handoffs when finished:
 
 ```bash
-./scripts/claude-codex handoff /path/to/target-repo worker-01 \
+claude-codex handoff /path/to/target-repo worker-01 \
   --branch worker/feature-area \
   --worktree /path/to/worktree \
   --summary "Implemented assigned task." \
