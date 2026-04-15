@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from claude_codex.cli import main
 
@@ -166,6 +167,37 @@ class CliTestCase(unittest.TestCase):
         handoff_file = self.repo / ".orchestrator/handoffs/worker-01.md"
         self.assertEqual(exit_code, 0)
         self.assertIn("Implemented task.", handoff_file.read_text(encoding="utf-8"))
+
+    def test_run_dry_run_uses_claude_plan_without_side_effects(self) -> None:
+        """run --dry-run asks for a plan but skips state, worktree, and cmux side effects."""
+        plan = {
+            "summary": "Update UI",
+            "worker_count": 1,
+            "tasks": [
+                {
+                    "title": "UI update",
+                    "objective": "Implement the requested UI update.",
+                    "owned_scope": ["src/ui"],
+                    "non_goals": ["backend changes"],
+                    "required_tests": ["npm test"],
+                    "risks": ["visual regression"],
+                }
+            ],
+        }
+
+        with patch("claude_codex.runner.request_plan", return_value=plan):
+            exit_code = self.run_cli(
+                "run",
+                "--repo",
+                str(self.repo),
+                "--dry-run",
+                "--workers",
+                "1",
+                "make the UI cleaner",
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((self.repo / ".orchestrator").exists())
 
 
 if __name__ == "__main__":

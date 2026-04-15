@@ -5,6 +5,21 @@
 
 The local CLI enforces the state-file protocol before cmux/omx automation is added.
 
+Interactive launch from a target repository:
+
+```bash
+cd /path/to/target-repo
+ccx
+```
+
+One-shot launch:
+
+```bash
+ccx run "implement the requested feature"
+```
+
+In run mode, Claude Opus plans the worker split, `ccx` creates the shared `.orchestrator` state and git worktrees, then cmux opens one Claude conductor pane and one Codex pane per worker.
+
 ```bash
 ./scripts/claude-codex init /path/to/target-repo feature-name 3
 ./scripts/claude-codex status /path/to/target-repo

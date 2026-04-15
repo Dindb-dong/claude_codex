@@ -43,6 +43,22 @@ ln -sfn /Users/maxkim/claude_codex/scripts/claude-codex ~/.local/bin/ccx
 
 After that, `claude-codex` and the shorter `ccx` alias work from any directory as long as `~/.local/bin` is in `PATH`.
 
+Launch the interactive orchestrator from the repository you want to work on:
+
+```bash
+cd /Users/maxkim/leviosa-frontend
+ccx
+```
+
+Then type the request. `ccx` asks Claude Opus to decide the worker split, creates `.orchestrator` state, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
+
+Equivalent one-shot form:
+
+```bash
+cd /Users/maxkim/leviosa-frontend
+ccx run "implement the requested feature"
+```
+
 Initialize orchestration state in a target git repository:
 
 ```bash
@@ -88,6 +104,7 @@ Then start `cmux omx` or open Claude/Codex panes manually and paste the conducto
 ## CLI Commands
 
 ```text
+claude-codex run [request...] [--repo .] [--workers N] [--dry-run] [--skip-launch]
 claude-codex init <target-repo> <run-name> <worker-count>
 claude-codex status <target-repo> [--json]
 claude-codex validation <target-repo> <worker-id> ...
@@ -99,6 +116,12 @@ claude-codex handoff <target-repo> <worker-id> ...
 ```
 
 `ccx` is an equivalent short alias for every command above.
+
+Default model settings:
+
+- Claude conductor: `opus`, effort `medium`.
+- Codex workers: `gpt-5.3-codex`, reasoning effort `medium`.
+- Human label `normal` is treated as `medium` internally because the installed CLIs accept `medium`, not `normal`.
 
 ## Safety Rules
 
