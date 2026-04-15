@@ -3,9 +3,11 @@
 .env.*
 !.env.example
 node_modules/
+.venv/
 .orchestrator/approvals/*.local.json
 
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/

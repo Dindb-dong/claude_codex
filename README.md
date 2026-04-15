@@ -67,7 +67,9 @@ ccx
 
 Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
 
-At the pre-launch prompt, type `/` to preview the Claude + ccx slash command setup.
+At the pre-launch prompt, type `/` to open a styled slash-command picker. Use arrow keys
+to move and Enter to select. The list includes Claude-native command references and ccx
+commands labeled like `status(ccx)` to avoid ambiguity.
 
 One-shot form:
 

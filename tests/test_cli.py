@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -237,6 +237,26 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 130)
         self.assertIn("interrupted", stderr.getvalue())
+
+    def test_slash_menu_lists_claude_and_ccx_commands(self) -> None:
+        """slash menu includes Claude references and ccx command labels."""
+        from claude_codex.runner import show_slash_menu
+
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            show_slash_menu()
+
+        output = stdout.getvalue()
+        self.assertIn("/browse", output)
+        self.assertIn("/status", output)
+        self.assertIn("status(ccx)", output)
+
+    def test_slash_exit_returns_empty_request(self) -> None:
+        """slash exit command exits the pre-launch prompt."""
+        from claude_codex.runner import handle_slash_command
+
+        self.assertEqual(handle_slash_command("/exit", self.repo), "")
 
     def test_run_skip_launch_uses_run_scoped_state(self) -> None:
         """run --skip-launch writes run-scoped state under .ccx/runs."""
