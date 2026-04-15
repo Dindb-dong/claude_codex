@@ -37,6 +37,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in incomplete i
 
 from claude_codex.claude_commands import install_claude_commands
 from claude_codex.cli import CliError, StatePaths, ensure_state_dirs, write_text
+from claude_codex.preflight import check_claude_auth, claude_auth_failure_message
 
 MAX_AUTO_WORKERS = 6
 EFFORT_ALIASES = {"normal": "medium", "med": "medium"}
@@ -575,6 +576,18 @@ def parse_json_object(raw_output: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise CliError("Claude plan was not a JSON object")
     return value
+
+
+def ensure_claude_cli_authenticated() -> None:
+    """Fail fast when the Claude Code CLI cannot run non-interactive planning."""
+    print("ccx: checking Claude CLI authentication...", flush=True)
+    check = check_claude_auth()
+    if not check.logged_in:
+        raise CliError(claude_auth_failure_message(check))
+    print(
+        f"ccx: Claude CLI authenticated via {check.auth_method} ({check.claude_path}).",
+        flush=True,
+    )
 
 
 def request_plan(config: RunConfig) -> dict[str, Any]:
@@ -1705,6 +1718,12 @@ def print_doctor_status() -> None:
     for name, path in checks.items():
         marker = "OK" if path else "!!"
         print(f"[{marker}] {name}: {path or 'not found in PATH'}")
+    auth_check = check_claude_auth()
+    if auth_check.logged_in:
+        print(f"[OK] claude auth: {auth_check.auth_method} ({auth_check.api_provider})")
+    else:
+        print(f"[!!] claude auth: {auth_check.error}")
+        print("     Run `claude`, execute `/login`, then retry `ccx`.")
     if all(checks.values()):
         print("ccx doctor: all required commands found")
 
@@ -1767,6 +1786,7 @@ def run_orchestration(config: RunConfig) -> int:
     worktree_root = config.repo.parent / ".ccx-worktrees" / config.repo.name / run_id
     integration_worktree = worktree_root / "integration"
 
+    ensure_claude_cli_authenticated()
     print("ccx: asking Claude to decompose the task...")
     raw_plan = request_plan(config)
     plan = normalize_plan(raw_plan, config, run_id, worktree_root)

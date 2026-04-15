@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from claude_codex.preflight import check_claude_auth
+
 STATE_DIR_NAME = ".orchestrator"
 RECOMMENDATIONS = {"approve", "revise", "reject"}
 WORKER_ID_PATTERN = re.compile(r"^worker-[0-9]{2}$")
@@ -467,6 +469,13 @@ def command_doctor(_: argparse.Namespace) -> int:
         else:
             print(f"[!!] {name}: not found in PATH")
             failed = True
+    auth_check = check_claude_auth()
+    if auth_check.logged_in:
+        print(f"[OK] claude auth: {auth_check.auth_method} ({auth_check.api_provider})")
+    else:
+        print(f"[!!] claude auth: {auth_check.error}")
+        print("     Run `claude`, execute `/login`, then retry `ccx`.")
+        failed = True
     if failed:
         return 1
     print("ccx doctor: all required commands found")

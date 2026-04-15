@@ -20,6 +20,10 @@ Check your environment after installation:
 ccx doctor
 ```
 
+`ccx run` uses non-interactive `claude --print` for planning. `ccx doctor`
+also checks Claude Code CLI auth; if it reports logged out, run `claude` in the
+same terminal and execute `/login` before launching ccx.
+
 ## Install
 
 Clone the repository and install editable mode:

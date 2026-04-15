@@ -13,6 +13,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from claude_codex.cli import main
+from claude_codex.preflight import ClaudeAuthCheck
+
+
+def authenticated_claude_check() -> ClaudeAuthCheck:
+    """Return a passing Claude auth check for orchestration tests."""
+    return ClaudeAuthCheck(
+        claude_path="/usr/local/bin/claude",
+        logged_in=True,
+        auth_method="oauth",
+        api_provider="firstParty",
+    )
 
 
 class CliTestCase(unittest.TestCase):
@@ -197,7 +208,12 @@ class CliTestCase(unittest.TestCase):
             ],
         }
 
-        with patch("claude_codex.runner.request_plan", return_value=plan):
+        with (
+            patch(
+                "claude_codex.runner.check_claude_auth", return_value=authenticated_claude_check()
+            ),
+            patch("claude_codex.runner.request_plan", return_value=plan),
+        ):
             exit_code = self.run_cli(
                 "run",
                 "--repo",
@@ -210,6 +226,36 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertFalse((self.repo / ".orchestrator").exists())
+
+    def test_run_fails_before_planning_when_claude_is_logged_out(self) -> None:
+        """run fails fast with a recovery message when Claude auth is missing."""
+        logged_out = ClaudeAuthCheck(
+            claude_path="/usr/local/bin/claude",
+            logged_in=False,
+            auth_method="none",
+            api_provider="firstParty",
+            error="Claude CLI is not logged in",
+            raw_output='{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}',
+        )
+        stderr = StringIO()
+
+        with (
+            patch("claude_codex.runner.check_claude_auth", return_value=logged_out),
+            patch("claude_codex.runner.request_plan") as request_plan,
+            redirect_stderr(stderr),
+        ):
+            exit_code = self.run_cli(
+                "run",
+                "--repo",
+                str(self.repo),
+                "--dry-run",
+                "make the UI cleaner",
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(request_plan.called)
+        self.assertIn("Claude CLI is not logged in", stderr.getvalue())
+        self.assertIn("Execute `/login`", stderr.getvalue())
 
     def test_run_without_request_handles_noninteractive_stdin(self) -> None:
         """run without a request fails cleanly when stdin cannot provide one."""
@@ -300,7 +346,12 @@ class CliTestCase(unittest.TestCase):
             ],
         }
 
-        with patch("claude_codex.runner.request_plan", return_value=plan):
+        with (
+            patch(
+                "claude_codex.runner.check_claude_auth", return_value=authenticated_claude_check()
+            ),
+            patch("claude_codex.runner.request_plan", return_value=plan),
+        ):
             exit_code = self.run_cli(
                 "run",
                 "--repo",
@@ -428,6 +479,49 @@ class CliTestCase(unittest.TestCase):
         exit_code = self.run_cli("doctor")
 
         self.assertIn(exit_code, {0, 1})
+
+    def test_doctor_reports_claude_auth_failure(self) -> None:
+        """doctor explains missing Claude auth."""
+        logged_out = ClaudeAuthCheck(
+            claude_path="/usr/local/bin/claude",
+            logged_in=False,
+            auth_method="none",
+            api_provider="firstParty",
+            error="Claude CLI is not logged in",
+        )
+        stdout = StringIO()
+
+        with (
+            patch("claude_codex.cli.shutil.which", return_value="/usr/local/bin/tool"),
+            patch("claude_codex.cli.check_claude_auth", return_value=logged_out),
+            redirect_stdout(stdout),
+        ):
+            exit_code = self.run_cli("doctor")
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("[!!] claude auth: Claude CLI is not logged in", stdout.getvalue())
+
+    def test_claude_auth_check_parses_logged_out_json_with_nonzero_exit(self) -> None:
+        """Claude may return logged-out JSON with a nonzero exit code."""
+        from claude_codex.preflight import check_claude_auth
+
+        completed = subprocess.CompletedProcess(
+            ["claude", "auth", "status"],
+            1,
+            stdout='{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}',
+            stderr="",
+        )
+
+        with (
+            patch("claude_codex.preflight.shutil.which", return_value="/usr/local/bin/claude"),
+            patch("claude_codex.preflight.subprocess.run", return_value=completed),
+        ):
+            check = check_claude_auth()
+
+        self.assertFalse(check.logged_in)
+        self.assertEqual(check.error, "Claude CLI is not logged in")
+        self.assertEqual(check.auth_method, "none")
+        self.assertEqual(check.api_provider, "firstParty")
 
 
 if __name__ == "__main__":
