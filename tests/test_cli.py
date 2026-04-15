@@ -206,6 +206,25 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_status_supports_target_repo(self) -> None:
+        """status prints runtime state for a target repository."""
+        exit_code = self.run_cli("status", str(self.repo))
+
+        self.assertEqual(exit_code, 0)
+
+    def test_install_claude_commands_writes_user_commands(self) -> None:
+        """install-claude-commands writes ccx slash commands under ~/.claude."""
+        fake_home = Path(self.temp_dir.name) / "home"
+        fake_home.mkdir()
+
+        with patch("pathlib.Path.home", return_value=fake_home):
+            exit_code = self.run_cli("install-claude-commands")
+
+        self.assertEqual(exit_code, 0)
+        command_file = fake_home / ".claude/commands/ccx-status.md"
+        self.assertTrue(command_file.exists())
+        self.assertIn("status(ccx)", command_file.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

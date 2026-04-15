@@ -12,6 +12,8 @@ cd /path/to/target-repo
 ccx
 ```
 
+At the pre-launch prompt, type `/` to preview the Claude + ccx slash command setup. The launched conductor is still a normal Claude Code session, so Claude native slash commands remain available. ccx installs additional user-level Claude slash commands named `/ccx-status`, `/ccx-watch`, `/ccx-resume`, and `/ccx-stop`; their descriptions use `status(ccx)` style labels to show they belong to ccx.
+
 One-shot launch:
 
 ```bash

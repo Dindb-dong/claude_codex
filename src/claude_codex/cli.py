@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -109,7 +110,16 @@ def resolve_repo(raw_path: str) -> Path:
     if not repo.exists() or not repo.is_dir():
         raise CliError(f"target repository does not exist: {repo}")
     if not (repo / ".git").exists():
-        raise CliError(f"target repository is not a git repository: {repo}")
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise CliError(f"target repository is not a git repository: {repo}")
+        return Path(completed.stdout.strip()).resolve()
     return repo
 
 
@@ -351,29 +361,59 @@ def command_status(args: argparse.Namespace) -> int:
     Args:
         args: Parsed CLI arguments.
     """
-    repo = resolve_repo(args.target_repo)
-    paths = StatePaths(repo)
-    if not paths.root.exists():
-        raise CliError(f"state directory does not exist: {paths.root}")
-    status = build_status(paths)
-    if args.json:
-        print(json.dumps(status, indent=2, sort_keys=True))
-        return 0
+    from claude_codex.runner import print_runtime_status
 
-    print(f"repo: {status['repo']}")
-    print(f"state: {status['state_dir']}")
-    print(f"approved: {'yes' if status['approved'] else 'no'}")
-    print(f"workers: {', '.join(status['workers']) if status['workers'] else 'none'}")
-    print(f"validations: {status['validation_count']}/{status['task_count']}")
-    print(f"questions: {status['question_count']}")
-    print(f"resolved questions: {status['resolved_question_count']}")
-    print(f"handoffs: {status['handoff_count']}/{status['task_count']}")
-    if status["missing_validations"]:
-        print("missing validations: " + ", ".join(status["missing_validations"]))
-    if status["questions"]:
-        print("open questions: " + ", ".join(status["questions"]))
-    if status["missing_handoffs"]:
-        print("missing handoffs: " + ", ".join(status["missing_handoffs"]))
+    return print_runtime_status(resolve_repo(args.target_repo), as_json=args.json)
+
+
+def command_watch(args: argparse.Namespace) -> int:
+    """Watch orchestration status.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    from claude_codex.runner import watch_runtime
+
+    return watch_runtime(
+        resolve_repo(args.target_repo),
+        interval=args.interval,
+        once=args.once,
+        max_ticks=args.count,
+    )
+
+
+def command_resume(args: argparse.Namespace) -> int:
+    """Resume a previous ccx run.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    from claude_codex.runner import resume_runtime
+
+    return resume_runtime(resolve_repo(args.target_repo))
+
+
+def command_stop(args: argparse.Namespace) -> int:
+    """Stop a ccx run.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    from claude_codex.runner import stop_runtime
+
+    return stop_runtime(resolve_repo(args.target_repo), close_cmux=args.close_cmux)
+
+
+def command_install_claude_commands(_: argparse.Namespace) -> int:
+    """Install ccx Claude Code slash commands.
+
+    Args:
+        _: Parsed CLI arguments.
+    """
+    from claude_codex.claude_commands import install_claude_commands
+
+    for path in install_claude_commands():
+        print(f"installed: {path}")
     return 0
 
 
@@ -639,6 +679,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.set_defaults(func=command_run)
 
+    install_commands_parser = subparsers.add_parser(
+        "install-claude-commands",
+        help="install ccx commands into Claude Code slash commands",
+    )
+    install_commands_parser.set_defaults(func=command_install_claude_commands)
+
     init_parser = subparsers.add_parser("init", help="initialize orchestration state")
     init_parser.add_argument("target_repo")
     init_parser.add_argument("run_name")
@@ -647,9 +693,29 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.set_defaults(func=command_init)
 
     status_parser = subparsers.add_parser("status", help="show orchestration status")
-    status_parser.add_argument("target_repo")
+    status_parser.add_argument("target_repo", nargs="?", default=".")
     status_parser.add_argument("--json", action="store_true", help="print JSON status")
     status_parser.set_defaults(func=command_status)
+
+    watch_parser = subparsers.add_parser("watch", help="watch orchestration status")
+    watch_parser.add_argument("target_repo", nargs="?", default=".")
+    watch_parser.add_argument("--interval", type=float, default=2.0)
+    watch_parser.add_argument("--once", action="store_true")
+    watch_parser.add_argument("--count", type=positive_int, default=0)
+    watch_parser.set_defaults(func=command_watch)
+
+    resume_parser = subparsers.add_parser("resume", help="resume a previous ccx run")
+    resume_parser.add_argument("target_repo", nargs="?", default=".")
+    resume_parser.set_defaults(func=command_resume)
+
+    stop_parser = subparsers.add_parser("stop", help="stop a ccx run")
+    stop_parser.add_argument("target_repo", nargs="?", default=".")
+    stop_parser.add_argument(
+        "--close-cmux",
+        action="store_true",
+        help="also close the recorded cmux workspace",
+    )
+    stop_parser.set_defaults(func=command_stop)
 
     barrier_parser = subparsers.add_parser("check-barrier", help="check approval barrier")
     barrier_parser.add_argument("target_repo")

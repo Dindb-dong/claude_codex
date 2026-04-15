@@ -52,6 +52,13 @@ ccx
 
 Then type the request. `ccx` asks Claude Opus to decide the worker split, creates `.orchestrator` state, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
 
+Typing `/` at the pre-launch prompt previews the Claude + ccx slash command setup. The actual conductor is a normal Claude Code session, so Claude native slash commands remain available. ccx also installs these user-level Claude slash commands:
+
+- `/ccx-status`: `status(ccx)`
+- `/ccx-watch`: `watch(ccx)`
+- `/ccx-resume`: `resume(ccx)`
+- `/ccx-stop`: `stop(ccx)`
+
 Equivalent one-shot form:
 
 ```bash
@@ -105,8 +112,12 @@ Then start `cmux omx` or open Claude/Codex panes manually and paste the conducto
 
 ```text
 claude-codex run [request...] [--repo .] [--workers N] [--dry-run] [--skip-launch]
+claude-codex install-claude-commands
 claude-codex init <target-repo> <run-name> <worker-count>
-claude-codex status <target-repo> [--json]
+claude-codex status [target-repo] [--json]
+claude-codex watch [target-repo] [--interval seconds] [--once]
+claude-codex resume [target-repo]
+claude-codex stop [target-repo] [--close-cmux]
 claude-codex validation <target-repo> <worker-id> ...
 claude-codex question <target-repo> <worker-id> ...
 claude-codex resolve-question <target-repo> <question-name> --answer "..."
