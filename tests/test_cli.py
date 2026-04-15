@@ -252,6 +252,12 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(run_dirs[0].name, current_run)
         self.assertTrue((run_dirs[0] / "run-state.json").exists())
         self.assertFalse((self.repo / ".orchestrator").exists())
+        conductor_prompt = (run_dirs[0] / "prompts/claude-conductor.md").read_text(encoding="utf-8")
+        worker_prompt = (run_dirs[0] / "prompts/worker-01.md").read_text(encoding="utf-8")
+        resolved_repo = self.repo.resolve()
+        self.assertIn("Esc may interrupt Claude/Codex without notifying ccx", conductor_prompt)
+        self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
+        self.assertIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
 
     def test_status_supports_target_repo(self) -> None:
         """status prints runtime state for a target repository."""

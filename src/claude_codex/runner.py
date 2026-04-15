@@ -612,8 +612,35 @@ def create_worktrees(repo: Path, run_id: str, plan: Plan, integration_worktree: 
         )
 
 
+def interrupt_recovery_prompt(config: RunConfig, run_id: str) -> str:
+    """Return prompt rules for recovering stale run state after user interrupts.
+
+    Args:
+        config: Runner configuration.
+        run_id: Run identifier.
+    """
+    status_command = f"ccx status {config.repo} --run {run_id} --json"
+    stop_command = f"ccx stop {config.repo} --run {run_id}"
+    lines = [
+        "Interrupt recovery:",
+        "- Ctrl-C is handled by the ccx agent wrapper and should mark this run stopped "
+        "automatically.",
+        "- Esc may interrupt Claude/Codex without notifying ccx, leaving stale `running` state.",
+        f"- Before resuming work after any explicit user interrupt, run: {status_command}",
+        "- If you are recovering from an explicit user interrupt and status is still "
+        f"`running`, run: {stop_command}",
+        "- Never stop the run only because status is `running`; only stop it when you are "
+        "recovering from a user interrupt or stale interrupted agent state.",
+    ]
+    return "\n".join(lines)
+
+
 def conductor_prompt(
-    config: RunConfig, plan: Plan, paths: StatePaths, integration_worktree: Path
+    config: RunConfig,
+    plan: Plan,
+    paths: StatePaths,
+    integration_worktree: Path,
+    run_id: str,
 ) -> str:
     """Build the interactive Claude conductor prompt.
 
@@ -622,6 +649,7 @@ def conductor_prompt(
         plan: Normalized run plan.
         paths: Shared state paths.
         integration_worktree: Integration worktree path.
+        run_id: Run identifier.
     """
     return f"""You are the Claude conductor for this ccx run.
 
@@ -653,17 +681,20 @@ Hard workflow:
 9. Split coherent commits and push a branch/PR.
 10. Do not merge without explicit human approval.
 
+{interrupt_recovery_prompt(config, run_id)}
+
 Start by reading {paths.root / "plan.md"} and the task files.
 """
 
 
-def worker_prompt(config: RunConfig, task: WorkerTask, paths: StatePaths) -> str:
+def worker_prompt(config: RunConfig, task: WorkerTask, paths: StatePaths, run_id: str) -> str:
     """Build the interactive Codex worker prompt.
 
     Args:
         config: Runner configuration.
         task: Worker task.
         paths: Shared state paths.
+        run_id: Run identifier.
     """
     return f"""You are {task.worker_id}, a Codex worker in a ccx Claude + Codex run.
 
@@ -686,6 +717,8 @@ Hard rules:
 7. On completion, write handoff to: {paths.handoffs / f"{task.worker_id}.md"}
 8. Do not merge or push.
 
+{interrupt_recovery_prompt(config, run_id)}
+
 Begin by reading your task file and producing validation.
 """
 
@@ -695,6 +728,7 @@ def write_prompt_files(
     plan: Plan,
     paths: StatePaths,
     integration_worktree: Path,
+    run_id: str,
 ) -> dict[str, Path]:
     """Write conductor and worker prompt files.
 
@@ -703,19 +737,20 @@ def write_prompt_files(
         plan: Normalized run plan.
         paths: Shared state paths.
         integration_worktree: Integration worktree path.
+        run_id: Run identifier.
     """
     prompt_dir = paths.root / "prompts"
     prompt_paths: dict[str, Path] = {}
     conductor_path = prompt_dir / "claude-conductor.md"
     write_text(
         conductor_path,
-        conductor_prompt(config, plan, paths, integration_worktree),
+        conductor_prompt(config, plan, paths, integration_worktree, run_id),
         force=config.force_state,
     )
     prompt_paths["conductor"] = conductor_path
     for task in plan.tasks:
         path = prompt_dir / f"{task.worker_id}.md"
-        write_text(path, worker_prompt(config, task, paths), force=config.force_state)
+        write_text(path, worker_prompt(config, task, paths, run_id), force=config.force_state)
         prompt_paths[task.worker_id] = path
     return prompt_paths
 
@@ -1441,7 +1476,7 @@ def run_orchestration(config: RunConfig) -> int:
     create_worktrees(config.repo, run_id, plan, integration_worktree)
     print(f"ccx: created worktrees under {worktree_root}")
 
-    prompt_paths = write_prompt_files(config, plan, paths, integration_worktree)
+    prompt_paths = write_prompt_files(config, plan, paths, integration_worktree, run_id)
     print(f"ccx: wrote prompts to {paths.root / 'prompts'}")
 
     if config.skip_launch:
