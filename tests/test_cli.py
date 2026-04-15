@@ -249,8 +249,33 @@ class CliTestCase(unittest.TestCase):
 
         output = stdout.getvalue()
         self.assertIn("/browse", output)
+        self.assertIn("/usage", output)
         self.assertIn("/status", output)
         self.assertIn("status(ccx)", output)
+
+    def test_slash_usage_is_claude_reference(self) -> None:
+        """usage is treated as a Claude-native reference, not an unknown command."""
+        from claude_codex.runner import handle_slash_command
+
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            result = handle_slash_command("/usage", self.repo)
+
+        self.assertIsNone(result)
+        self.assertIn("Claude command /usage", stdout.getvalue())
+
+    def test_unknown_slash_command_is_explained(self) -> None:
+        """unknown slash commands tell the user where Claude-native commands work."""
+        from claude_codex.runner import handle_slash_command
+
+        stdout = StringIO()
+
+        with redirect_stdout(stdout):
+            result = handle_slash_command("/not-a-command", self.repo)
+
+        self.assertIsNone(result)
+        self.assertIn("not handled by the ccx pre-launch prompt", stdout.getvalue())
 
     def test_slash_exit_returns_empty_request(self) -> None:
         """slash exit command exits the pre-launch prompt."""
@@ -306,6 +331,15 @@ class CliTestCase(unittest.TestCase):
         exit_code = self.run_cli("status", str(self.repo))
 
         self.assertEqual(exit_code, 0)
+
+    def test_status_without_run_uses_ccx_runs_root(self) -> None:
+        """runtime status defaults to the ccx runs root when no run exists."""
+        from claude_codex.runner import runtime_status
+
+        status = runtime_status(self.repo)
+
+        self.assertEqual(status["status"], "not-started")
+        self.assertEqual(status["state_dir"], str(self.repo.resolve() / ".ccx/runs"))
 
     def test_agent_command_wraps_child_with_prompt(self) -> None:
         """agent runs a child command with the prompt appended."""

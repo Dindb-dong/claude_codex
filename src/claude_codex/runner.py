@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -136,6 +137,15 @@ class SlashCommand:
 def slash_commands() -> list[SlashCommand]:
     """Return Claude-native reference commands plus local ccx commands."""
     return [
+        SlashCommand("/help", "Show Claude Code help and available slash commands", "claude"),
+        SlashCommand("/usage", "Show Claude Code usage and plan limits", "claude"),
+        SlashCommand("/model", "Switch or inspect the active Claude model", "claude"),
+        SlashCommand("/clear", "Clear the current Claude conversation context", "claude"),
+        SlashCommand("/compact", "Compact Claude conversation context", "claude"),
+        SlashCommand("/memory", "Edit or inspect Claude memory files", "claude"),
+        SlashCommand("/permissions", "Manage Claude tool permission mode", "claude"),
+        SlashCommand("/agents", "List or manage Claude Code agents", "claude"),
+        SlashCommand("/mcp", "Manage Claude MCP servers", "claude"),
         SlashCommand(
             "/browse",
             "Fast headless browser for QA testing and site dogfooding",
@@ -417,9 +427,9 @@ def resolve_state_paths(repo: Path, run_id: str | None = None) -> StatePaths:
     if selected_run:
         return StatePaths(root, run_state_root(root, selected_run))
     legacy = StatePaths(root)
-    if legacy.root.exists():
+    if runtime_state_path(legacy).exists():
         return legacy
-    return StatePaths(root, legacy.root)
+    return StatePaths(root, runs_root(root))
 
 
 def runtime_state_path(paths: StatePaths) -> Path:
@@ -1570,6 +1580,21 @@ def show_slash_menu() -> None:
     print("In the interactive prompt, type / and use arrow keys to choose.")
 
 
+def print_doctor_status() -> None:
+    """Print local dependency checks for the pre-launch slash prompt."""
+    checks = {
+        "git": shutil.which("git"),
+        "cmux": shutil.which("cmux"),
+        "claude": shutil.which("claude"),
+        "codex": shutil.which("codex"),
+    }
+    for name, path in checks.items():
+        marker = "OK" if path else "!!"
+        print(f"[{marker}] {name}: {path or 'not found in PATH'}")
+    if all(checks.values()):
+        print("ccx doctor: all required commands found")
+
+
 def handle_slash_command(raw_command: str, repo: Path) -> str | None:
     """Handle a selected slash command in the pre-launch ccx prompt.
 
@@ -1580,7 +1605,10 @@ def handle_slash_command(raw_command: str, repo: Path) -> str | None:
     command_name = raw_command.strip().split(maxsplit=1)[0]
     command = next((item for item in slash_commands() if item.trigger == command_name), None)
     if command is None:
-        print(f"unknown slash command: {command_name}")
+        print(
+            f"{command_name} is not handled by the ccx pre-launch prompt. "
+            "If it is a Claude-native command, use it inside the launched Claude conductor."
+        )
         return None
     if command.action == "exit":
         return ""
@@ -1588,7 +1616,7 @@ def handle_slash_command(raw_command: str, repo: Path) -> str | None:
         print_runtime_status(repo)
         return None
     if command.action == "doctor":
-        print("Run `ccx doctor` from another shell to check local dependencies.")
+        print_doctor_status()
         return None
     if command.source == "ccx":
         print(f"Selected {command.description}. Run: ccx {command.action} {repo}")
