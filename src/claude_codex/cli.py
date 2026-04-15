@@ -28,13 +28,17 @@ class StatePaths:
 
     Args:
         repo: Target git repository path.
+        state_root: Optional explicit state directory root.
     """
 
     repo: Path
+    state_root: Path | None = None
 
     @property
     def root(self) -> Path:
         """Return the orchestration state root path."""
+        if self.state_root is not None:
+            return self.state_root
         return self.repo / STATE_DIR_NAME
 
     @property
@@ -364,7 +368,7 @@ def command_status(args: argparse.Namespace) -> int:
     """
     from claude_codex.runner import print_runtime_status
 
-    return print_runtime_status(resolve_repo(args.target_repo), as_json=args.json)
+    return print_runtime_status(resolve_repo(args.target_repo), as_json=args.json, run_id=args.run)
 
 
 def command_watch(args: argparse.Namespace) -> int:
@@ -380,6 +384,7 @@ def command_watch(args: argparse.Namespace) -> int:
         interval=args.interval,
         once=args.once,
         max_ticks=args.count,
+        run_id=args.run,
     )
 
 
@@ -391,7 +396,7 @@ def command_resume(args: argparse.Namespace) -> int:
     """
     from claude_codex.runner import resume_runtime
 
-    return resume_runtime(resolve_repo(args.target_repo))
+    return resume_runtime(resolve_repo(args.target_repo), run_id=args.run)
 
 
 def command_stop(args: argparse.Namespace) -> int:
@@ -402,7 +407,7 @@ def command_stop(args: argparse.Namespace) -> int:
     """
     from claude_codex.runner import stop_runtime
 
-    return stop_runtime(resolve_repo(args.target_repo), close_cmux=args.close_cmux)
+    return stop_runtime(resolve_repo(args.target_repo), close_cmux=args.close_cmux, run_id=args.run)
 
 
 def command_install_claude_commands(_: argparse.Namespace) -> int:
@@ -723,11 +728,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser("status", help="show orchestration status")
     status_parser.add_argument("target_repo", nargs="?", default=".")
+    status_parser.add_argument("--run", help="select a specific run id")
     status_parser.add_argument("--json", action="store_true", help="print JSON status")
     status_parser.set_defaults(func=command_status)
 
     watch_parser = subparsers.add_parser("watch", help="watch orchestration status")
     watch_parser.add_argument("target_repo", nargs="?", default=".")
+    watch_parser.add_argument("--run", help="select a specific run id")
     watch_parser.add_argument("--interval", type=float, default=2.0)
     watch_parser.add_argument("--once", action="store_true")
     watch_parser.add_argument("--count", type=positive_int, default=0)
@@ -735,10 +742,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     resume_parser = subparsers.add_parser("resume", help="resume a previous ccx run")
     resume_parser.add_argument("target_repo", nargs="?", default=".")
+    resume_parser.add_argument("--run", help="select a specific run id")
     resume_parser.set_defaults(func=command_resume)
 
     stop_parser = subparsers.add_parser("stop", help="stop a ccx run")
     stop_parser.add_argument("target_repo", nargs="?", default=".")
+    stop_parser.add_argument("--run", help="select a specific run id")
     stop_parser.add_argument(
         "--close-cmux",
         action="store_true",

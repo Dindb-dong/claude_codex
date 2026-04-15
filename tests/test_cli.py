@@ -21,6 +21,15 @@ class CliTestCase(unittest.TestCase):
         self.repo = Path(self.temp_dir.name) / "repo"
         self.repo.mkdir()
         subprocess.run(["git", "init"], cwd=self.repo, check=True, capture_output=True, text=True)
+        (self.repo / "README.md").write_text("# test repo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "chore: init test repo"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def tearDown(self) -> None:
         """Clean up the temporary git repository."""
@@ -205,6 +214,43 @@ class CliTestCase(unittest.TestCase):
             exit_code = self.run_cli("run", "--repo", str(self.repo))
 
         self.assertEqual(exit_code, 1)
+
+    def test_run_skip_launch_uses_run_scoped_state(self) -> None:
+        """run --skip-launch writes run-scoped state under .ccx/runs."""
+        plan = {
+            "summary": "Update UI",
+            "worker_count": 1,
+            "tasks": [
+                {
+                    "title": "UI update",
+                    "objective": "Implement the requested UI update.",
+                    "owned_scope": ["src/ui"],
+                    "non_goals": ["backend changes"],
+                    "required_tests": ["npm test"],
+                    "risks": ["visual regression"],
+                }
+            ],
+        }
+
+        with patch("claude_codex.runner.request_plan", return_value=plan):
+            exit_code = self.run_cli(
+                "run",
+                "--repo",
+                str(self.repo),
+                "--skip-launch",
+                "--workers",
+                "1",
+                "make the UI cleaner",
+            )
+
+        runs_dir = self.repo / ".ccx/runs"
+        run_dirs = list(runs_dir.iterdir())
+        current_run = (self.repo / ".ccx/current-run").read_text(encoding="utf-8").strip()
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(run_dirs), 1)
+        self.assertEqual(run_dirs[0].name, current_run)
+        self.assertTrue((run_dirs[0] / "run-state.json").exists())
+        self.assertFalse((self.repo / ".orchestrator").exists())
 
     def test_status_supports_target_repo(self) -> None:
         """status prints runtime state for a target repository."""
