@@ -1236,10 +1236,9 @@ def run_conductor_foreground(
     """
     print("ccx: starting Claude conductor in this terminal...")
     print("ccx: Codex workers are running in the cmux workspace.")
-    return run_agent_wrapper(
+    exec_foreground_agent(
         repo=config.repo,
         run_id=run_id,
-        role="conductor",
         prompt_path=prompt_path,
         child_command=claude_child_command(
             config.repo,
@@ -1249,6 +1248,70 @@ def run_conductor_foreground(
         ),
         cwd=integration_worktree,
     )
+    return 127
+
+
+def foreground_agent_script(*, repo: Path, run_id: str, prompt_path: Path) -> str:
+    """Build a shell launcher that leaves the child CLI in the foreground.
+
+    Args:
+        repo: Target repository path.
+        run_id: Run identifier.
+        prompt_path: Prompt file appended as the child CLI prompt argument.
+    """
+    stop_command = shlex.join([ccx_executable(), "stop", str(repo), "--run", run_id])
+    return f"""set +e
+prompt="$(cat -- "$CCX_PROMPT_PATH")" || exit 1
+"$@" "$prompt"
+code=$?
+if [ "$code" -ge 128 ]; then
+  {stop_command} >/dev/null 2>&1 || true
+fi
+exit "$code"
+"""
+
+
+def exec_foreground_agent(
+    *,
+    repo: Path,
+    run_id: str,
+    prompt_path: Path,
+    child_command: list[str],
+    cwd: Path,
+) -> None:
+    """Replace ccx with a foreground shell launcher for an interactive child CLI.
+
+    Args:
+        repo: Target repository path.
+        run_id: Run identifier.
+        prompt_path: Prompt file appended as the final child argument.
+        child_command: Child command arguments.
+        cwd: Child working directory.
+    """
+    if not prompt_path.exists():
+        raise CliError(f"prompt file does not exist: {prompt_path}")
+    if not child_command:
+        raise CliError("agent child command is required")
+    if not cwd.exists():
+        raise CliError(f"agent cwd does not exist: {cwd}")
+
+    env = os.environ.copy()
+    env["CCX_PROMPT_PATH"] = str(prompt_path)
+    try:
+        os.chdir(cwd)
+        os.execvpe(
+            "/bin/zsh",
+            [
+                "/bin/zsh",
+                "-lc",
+                foreground_agent_script(repo=repo, run_id=run_id, prompt_path=prompt_path),
+                "ccx-foreground-agent",
+                *child_command,
+            ],
+            env,
+        )
+    except FileNotFoundError as exc:
+        raise CliError("zsh shell not found for foreground agent launch") from exc
 
 
 def runtime_counts(paths: StatePaths) -> dict[str, int]:

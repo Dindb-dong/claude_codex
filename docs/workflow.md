@@ -26,7 +26,7 @@ ccx run "implement the requested feature"
 
 In run mode, Claude Opus plans the worker split, `ccx` creates run-scoped state under `.ccx/runs/<run-id>/` plus git worktrees, then cmux opens Codex worker panes while the Claude conductor starts in the current `ccx` terminal. `.ccx/current-run` points to the most recent run, and runtime commands accept `--run <run-id>` for older concurrent runs.
 
-Each launched Claude/Codex process runs through `ccx agent`, which appends the generated prompt to the command and records interrupts. Pressing `Ctrl-C` once in the conductor terminal or a worker pane interrupts the active child CLI and marks the run `stopped`; it does not close the cmux worker workspace unless the user separately runs `ccx stop --close-cmux`.
+Codex worker panes run through `ccx agent`, which appends the generated prompt to the command and records interrupts. The Claude conductor is launched as a foreground CLI in the original `ccx` terminal so user approval, arbitration, and review happen directly inside Claude. Pressing `Ctrl-C` interrupts the active child CLI and marks the run `stopped` when the child exits with a signal status; it does not close the cmux worker workspace unless the user separately runs `ccx stop --close-cmux`.
 
 `Esc` remains handled by Claude/Codex directly. Because that may leave ccx state stale, generated prompts tell agents to run `ccx status --run <run-id> --json` before resuming after an explicit user interrupt. If the run is still `running` during interrupt recovery, the agent first runs `ccx stop --run <run-id>` and then proceeds from the user's next instruction.
 

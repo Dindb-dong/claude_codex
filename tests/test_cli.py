@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -414,6 +415,33 @@ class CliTestCase(unittest.TestCase):
         )
 
         self.assertEqual(exit_code, 0)
+
+    def test_foreground_agent_script_appends_prompt_as_child_argument(self) -> None:
+        """foreground launcher runs the child command with the prompt argument."""
+        from claude_codex.runner import foreground_agent_script
+
+        prompt_path = self.repo / "prompt.md"
+        prompt_path.write_text("hello conductor\n", encoding="utf-8")
+        script = foreground_agent_script(repo=self.repo, run_id="run-1", prompt_path=prompt_path)
+
+        completed = subprocess.run(
+            [
+                "/bin/zsh",
+                "-lc",
+                script,
+                "ccx-foreground-agent",
+                sys.executable,
+                "-c",
+                "import sys; raise SystemExit(0 if sys.argv[-1] == 'hello conductor' else 2)",
+            ],
+            check=False,
+            env={**os.environ, "CCX_PROMPT_PATH": str(prompt_path)},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_agent_worker_requires_worker_id(self) -> None:
         """worker wrappers require an explicit worker id."""

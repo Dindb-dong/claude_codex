@@ -112,7 +112,7 @@ ccx resume --run 20260415123456000000-feature
 ccx stop --run 20260415123456000000-feature
 ```
 
-Launched Claude and Codex processes run through a lightweight `ccx agent` wrapper. Pressing `Ctrl-C` once in the conductor terminal or a worker pane interrupts the active Claude/Codex child process and marks the current ccx run as `stopped`. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux worker workspace.
+Codex workers run through a lightweight `ccx agent` wrapper. The Claude conductor is launched as a foreground CLI in the original `ccx` terminal so the user can approve, arbitrate, and review from Claude directly. Pressing `Ctrl-C` interrupts the active Claude/Codex child process and marks the current ccx run as `stopped` when the child exits with a signal status. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux worker workspace.
 
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated conductor and worker prompts include an interrupt recovery rule: before resuming after an explicit user interrupt, the agent checks `ccx status --run <run-id> --json`; if the run is still stale `running`, it first runs `ccx stop --run <run-id>`.
 
