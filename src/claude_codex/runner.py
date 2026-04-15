@@ -569,7 +569,8 @@ def parse_json_object(raw_output: str) -> dict[str, Any]:
         start = raw_output.find("{")
         end = raw_output.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise CliError("Claude did not return JSON plan") from None
+            preview = raw_output.strip()[:1200] or "(empty output)"
+            raise CliError(f"Claude did not return JSON plan. Output preview:\n{preview}") from None
         value = json.loads(raw_output[start : end + 1])
     if not isinstance(value, dict):
         raise CliError("Claude plan was not a JSON object")
@@ -582,7 +583,9 @@ def request_plan(config: RunConfig) -> dict[str, Any]:
     Args:
         config: Runner configuration.
     """
+    print("ccx: collecting repository context...", flush=True)
     snapshot = collect_repo_snapshot(config.repo)
+    print("ccx: building Claude planner prompt...", flush=True)
     command = [
         "claude",
         "--print",
@@ -594,8 +597,33 @@ def request_plan(config: RunConfig) -> dict[str, Any]:
         planner_schema(),
         planner_prompt(config, snapshot),
     ]
-    output = run_command(command, cwd=config.repo, timeout=240)
-    return parse_json_object(output)
+    print("ccx: starting Claude planner CLI...", flush=True)
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=config.repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise CliError("claude CLI not found in PATH") from exc
+    print("ccx: Claude planner request sent; waiting for response...", flush=True)
+    try:
+        stdout, stderr = process.communicate(timeout=240)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        stdout, stderr = process.communicate()
+        preview = (stderr or stdout).strip()[:1200] or "(empty output)"
+        raise CliError(f"Claude planner timed out after 240s:\n{preview}") from exc
+    if process.returncode != 0:
+        preview = (stderr or stdout).strip()[:1200] or "(empty output)"
+        raise CliError(f"Claude planner CLI failed with exit {process.returncode}:\n{preview}")
+    print("ccx: Claude planner response received.", flush=True)
+    print("ccx: parsing Claude planner JSON...", flush=True)
+    plan = parse_json_object(stdout)
+    print("ccx: Claude planner JSON parsed.", flush=True)
+    return plan
 
 
 def normalize_plan(
@@ -1026,51 +1054,84 @@ def first_surface_ref(output: str) -> str:
     return match.group(0)
 
 
-def launch_cmux(
+def claude_child_command(repo: Path, paths: StatePaths, *, model: str, effort: str) -> list[str]:
+    """Build the Claude conductor child command.
+
+    Args:
+        repo: Target repository path.
+        paths: Shared state paths.
+        model: Claude model.
+        effort: Claude effort.
+    """
+    return [
+        "claude",
+        "--model",
+        model,
+        "--effort",
+        effort,
+        "--add-dir",
+        str(repo),
+        "--add-dir",
+        str(paths.root),
+    ]
+
+
+def codex_child_command(*, model: str, effort: str, worktree: Path) -> list[str]:
+    """Build the Codex worker child command.
+
+    Args:
+        model: Codex model.
+        effort: Codex reasoning effort.
+        worktree: Worker worktree.
+    """
+    return [
+        "codex",
+        "--model",
+        model,
+        "-c",
+        f'model_reasoning_effort="{effort}"',
+        "--cd",
+        str(worktree),
+    ]
+
+
+def launch_cmux_workers(
     config: RunConfig,
     plan: Plan,
-    paths: StatePaths,
     prompt_paths: dict[str, Path],
     run_id: str,
-    integration_worktree: Path,
 ) -> str:
-    """Launch Claude conductor and Codex worker panes in cmux.
+    """Launch Codex worker panes in cmux.
 
     Args:
         config: Runner configuration.
         plan: Normalized run plan.
-        paths: Shared state paths.
         prompt_paths: Prompt files by role or worker ID.
         run_id: Run identifier.
-        integration_worktree: Integration worktree path.
     """
-    conductor_command = agent_command_with_prompt(
+    first_task = plan.tasks[0]
+    first_command = agent_command_with_prompt(
         repo=config.repo,
         run_id=run_id,
-        role="conductor",
-        prompt_path=prompt_paths["conductor"],
-        child_command=[
-            "claude",
-            "--model",
-            config.claude_model,
-            "--effort",
-            config.claude_effort,
-            "--add-dir",
-            str(config.repo),
-            "--add-dir",
-            str(paths.root),
-        ],
+        role="worker",
+        worker_id=first_task.worker_id,
+        prompt_path=prompt_paths[first_task.worker_id],
+        child_command=codex_child_command(
+            model=config.codex_model,
+            effort=config.codex_effort,
+            worktree=first_task.worktree,
+        ),
     )
     workspace_output = run_command(
         [
             "cmux",
             "new-workspace",
             "--name",
-            f"ccx {config.repo.name} {run_id}",
+            f"ccx workers {config.repo.name} {run_id}",
             "--cwd",
-            str(integration_worktree),
+            str(first_task.worktree),
             "--command",
-            conductor_command,
+            first_command,
         ],
         cwd=config.repo,
         timeout=30,
@@ -1080,7 +1141,7 @@ def launch_cmux(
         workspace = run_command(["cmux", "current-workspace"], cwd=config.repo, timeout=30)
 
     directions = ["right", "down", "right", "down", "right", "down"]
-    for index, task in enumerate(plan.tasks):
+    for index, task in enumerate(plan.tasks[1:]):
         pane_output = run_command(
             [
                 "cmux",
@@ -1113,15 +1174,11 @@ def launch_cmux(
             role="worker",
             worker_id=task.worker_id,
             prompt_path=prompt_paths[task.worker_id],
-            child_command=[
-                "codex",
-                "--model",
-                config.codex_model,
-                "-c",
-                f'model_reasoning_effort="{config.codex_effort}"',
-                "--cd",
-                str(task.worktree),
-            ],
+            child_command=codex_child_command(
+                model=config.codex_model,
+                effort=config.codex_effort,
+                worktree=task.worktree,
+            ),
         )
         run_command(
             [
@@ -1138,6 +1195,39 @@ def launch_cmux(
             timeout=30,
         )
     return workspace
+
+
+def run_conductor_foreground(
+    config: RunConfig,
+    paths: StatePaths,
+    prompt_path: Path,
+    run_id: str,
+    integration_worktree: Path,
+) -> int:
+    """Run the Claude conductor in the current ccx terminal.
+
+    Args:
+        config: Runner configuration.
+        paths: Shared state paths.
+        prompt_path: Claude conductor prompt file.
+        run_id: Run identifier.
+        integration_worktree: Integration worktree path.
+    """
+    print("ccx: starting Claude conductor in this terminal...")
+    print("ccx: Codex workers are running in the cmux workspace.")
+    return run_agent_wrapper(
+        repo=config.repo,
+        run_id=run_id,
+        role="conductor",
+        prompt_path=prompt_path,
+        child_command=claude_child_command(
+            config.repo,
+            paths,
+            model=config.claude_model,
+            effort=config.claude_effort,
+        ),
+        cwd=integration_worktree,
+    )
 
 
 def runtime_counts(paths: StatePaths) -> dict[str, int]:
@@ -1282,8 +1372,8 @@ def watch_runtime(
         time.sleep(interval)
 
 
-def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths) -> str:
-    """Relaunch conductor and worker panes from persisted state.
+def launch_cmux_workers_from_state(repo: Path, state: dict[str, Any], paths: StatePaths) -> str:
+    """Relaunch Codex worker panes from persisted state.
 
     Args:
         repo: Target repository path.
@@ -1291,44 +1381,43 @@ def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths)
         paths: Shared state paths.
     """
     prompt_dir = paths.root / "prompts"
-    conductor_prompt_path = prompt_dir / "claude-conductor.md"
-    if not conductor_prompt_path.exists():
-        raise CliError(f"missing conductor prompt: {conductor_prompt_path}")
-    integration = state.get("integration", {})
-    integration_worktree = Path(integration.get("worktree", ""))
-    if not integration_worktree.exists():
-        raise CliError(f"missing integration worktree: {integration_worktree}")
     models = state.get("models", {})
     run_id = str(state.get("run_id") or read_current_run(repo))
     if not run_id:
         raise CliError("missing run id in runtime state")
-    conductor_command = agent_command_with_prompt(
+    workers = list(state.get("workers", []))
+    if not workers:
+        raise CliError("no workers found in runtime state")
+
+    first_worker = workers[0]
+    first_worker_id = str(first_worker.get("id"))
+    first_prompt_path = prompt_dir / f"{first_worker_id}.md"
+    first_worktree = Path(str(first_worker.get("worktree", "")))
+    if not first_prompt_path.exists() or not first_worktree.exists():
+        raise CliError(f"missing first worker prompt or worktree: {first_worker_id}")
+
+    first_command = agent_command_with_prompt(
         repo=repo,
         run_id=run_id,
-        role="conductor",
-        prompt_path=conductor_prompt_path,
-        child_command=[
-            "claude",
-            "--model",
-            str(models.get("claude") or "opus"),
-            "--effort",
-            str(models.get("claude_effort") or "medium"),
-            "--add-dir",
-            str(repo),
-            "--add-dir",
-            str(paths.root),
-        ],
+        role="worker",
+        worker_id=first_worker_id,
+        prompt_path=first_prompt_path,
+        child_command=codex_child_command(
+            model=str(models.get("codex") or "gpt-5.3-codex"),
+            effort=str(models.get("codex_effort") or "medium"),
+            worktree=first_worktree,
+        ),
     )
     workspace_output = run_command(
         [
             "cmux",
             "new-workspace",
             "--name",
-            f"ccx {repo.name} resume",
+            f"ccx workers {repo.name} resume",
             "--cwd",
-            str(integration_worktree),
+            str(first_worktree),
             "--command",
-            conductor_command,
+            first_command,
         ],
         cwd=repo,
         timeout=30,
@@ -1338,7 +1427,7 @@ def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths)
         workspace = run_command(["cmux", "current-workspace"], cwd=repo, timeout=30)
 
     directions = ["right", "down", "right", "down", "right", "down"]
-    for index, worker in enumerate(state.get("workers", [])):
+    for index, worker in enumerate(workers[1:]):
         worker_id = str(worker.get("id"))
         prompt_path = prompt_dir / f"{worker_id}.md"
         worktree = Path(str(worker.get("worktree", "")))
@@ -1376,15 +1465,11 @@ def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths)
             role="worker",
             worker_id=worker_id,
             prompt_path=prompt_path,
-            child_command=[
-                "codex",
-                "--model",
-                str(models.get("codex") or "gpt-5.3-codex"),
-                "-c",
-                f'model_reasoning_effort="{models.get("codex_effort") or "medium"}"',
-                "--cd",
-                str(worktree),
-            ],
+            child_command=codex_child_command(
+                model=str(models.get("codex") or "gpt-5.3-codex"),
+                effort=str(models.get("codex_effort") or "medium"),
+                worktree=worktree,
+            ),
         )
         run_command(
             [
@@ -1415,14 +1500,41 @@ def resume_runtime(repo: Path, run_id: str | None = None) -> int:
     state = read_runtime_state(root, run_id)
     if not state:
         raise CliError("no ccx runtime state found")
-    workspace = launch_cmux_from_state(root, state, paths)
+    workspace = launch_cmux_workers_from_state(root, state, paths)
     state["status"] = "running"
     state["cmux_workspace"] = workspace
     state["resumed_at"] = datetime.now(UTC).isoformat()
     write_current_run(root, state["run_id"])
     write_runtime_state(root, state, state["run_id"])
-    print(f"resumed ccx workspace: {workspace}")
-    return 0
+    print(f"resumed ccx worker workspace: {workspace}")
+
+    prompt_path = paths.root / "prompts" / "claude-conductor.md"
+    if not prompt_path.exists():
+        raise CliError(f"missing conductor prompt: {prompt_path}")
+    integration = state.get("integration", {})
+    integration_worktree = Path(integration.get("worktree", ""))
+    if not integration_worktree.exists():
+        raise CliError(f"missing integration worktree: {integration_worktree}")
+    models = state.get("models", {})
+    config = RunConfig(
+        repo=root,
+        request=str(state.get("request") or ""),
+        claude_model=str(models.get("claude") or "opus"),
+        claude_effort=str(models.get("claude_effort") or "medium"),
+        codex_model=str(models.get("codex") or "gpt-5.3-codex"),
+        codex_effort=str(models.get("codex_effort") or "medium"),
+        requested_workers=None,
+        dry_run=False,
+        skip_launch=False,
+        force_state=False,
+    )
+    return run_conductor_foreground(
+        config,
+        paths,
+        prompt_path,
+        str(state["run_id"]),
+        integration_worktree,
+    )
 
 
 def mark_runtime_stopped(
@@ -1497,6 +1609,7 @@ def run_agent_wrapper(
     prompt_path: Path,
     child_command: list[str],
     worker_id: str | None = None,
+    cwd: Path | None = None,
 ) -> int:
     """Run a Claude or Codex child process and stop ccx on interrupt.
 
@@ -1507,6 +1620,7 @@ def run_agent_wrapper(
         prompt_path: Prompt file appended as the final child argument.
         child_command: Child command arguments.
         worker_id: Optional worker identifier.
+        cwd: Optional child working directory.
     """
     root = git_root(repo)
     if not prompt_path.exists():
@@ -1555,7 +1669,7 @@ def run_agent_wrapper(
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
     try:
-        child = subprocess.Popen(command)
+        child = subprocess.Popen(command, cwd=cwd)
         return_code = child.wait()
     except FileNotFoundError as exc:
         raise CliError(f"agent child command not found: {child_command[0]}") from exc
@@ -1703,13 +1817,21 @@ def run_orchestration(config: RunConfig) -> int:
         print("ccx: skipped cmux launch")
         return 0
 
-    workspace = launch_cmux(config, plan, paths, prompt_paths, run_id, integration_worktree)
+    print("ccx: launching Codex worker panes in cmux...")
+    workspace = launch_cmux_workers(config, plan, prompt_paths, run_id)
     state["status"] = "running"
     state["cmux_workspace"] = workspace
     state["launched_at"] = datetime.now(UTC).isoformat()
     write_runtime_state(config.repo, state, run_id)
-    print(f"ccx: launched cmux workspace {workspace}")
-    return 0
+    print(f"ccx: launched cmux worker workspace {workspace}")
+    print("ccx: Claude conductor CLI will start in this terminal.")
+    return run_conductor_foreground(
+        config,
+        paths,
+        prompt_paths["conductor"],
+        run_id,
+        integration_worktree,
+    )
 
 
 def prompt_for_request(repo: Path) -> str:

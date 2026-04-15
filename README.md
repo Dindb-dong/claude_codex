@@ -65,7 +65,7 @@ cd /path/to/your-repo
 ccx
 ```
 
-Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
+Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, launches Codex worker panes in cmux, and starts the Claude conductor in the current `ccx` terminal.
 
 At the pre-launch prompt, type `/` to open a styled slash-command picker. Use arrow keys
 to move and Enter to select. The list includes Claude-native command references and ccx
@@ -108,7 +108,7 @@ ccx resume --run 20260415123456000000-feature
 ccx stop --run 20260415123456000000-feature
 ```
 
-Launched Claude and Codex panes run through a lightweight `ccx agent` wrapper. Pressing `Ctrl-C` once in a conductor or worker pane interrupts the active Claude/Codex child process and marks the current ccx run as `stopped`. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux workspace.
+Launched Claude and Codex processes run through a lightweight `ccx agent` wrapper. Pressing `Ctrl-C` once in the conductor terminal or a worker pane interrupts the active Claude/Codex child process and marks the current ccx run as `stopped`. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux worker workspace.
 
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated conductor and worker prompts include an interrupt recovery rule: before resuming after an explicit user interrupt, the agent checks `ccx status --run <run-id> --json`; if the run is still stale `running`, it first runs `ccx stop --run <run-id>`.
 
@@ -160,7 +160,7 @@ export CCX_CODEX_EFFORT=medium
 
 - `docs/architecture.md`: system model and responsibilities.
 - `docs/workflow.md`: end-to-end operating flow.
-- `prompts/claude-conductor.md`: prompt for the Claude conductor pane.
+- `prompts/claude-conductor.md`: prompt for the Claude conductor running in the current ccx terminal.
 - `prompts/codex-worker.md`: prompt for each Codex worker pane.
 - `templates/`: task, validation, question, and handoff templates.
 - `src/claude_codex/`: Python CLI implementation.
