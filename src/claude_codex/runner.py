@@ -18,6 +18,9 @@ from claude_codex.cli import CliError, StatePaths, ensure_state_dirs, write_text
 
 MAX_AUTO_WORKERS = 6
 EFFORT_ALIASES = {"normal": "medium", "med": "medium"}
+CCX_DIR_NAME = ".ccx"
+RUNS_DIR_NAME = "runs"
+CURRENT_RUN_FILE = "current-run"
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,95 @@ def ensure_git_exclude(repo: Path, patterns: list[str]) -> None:
                 handle.write(f"{pattern}\n")
 
 
+def ccx_root(repo: Path) -> Path:
+    """Return the repository-local ccx state root.
+
+    Args:
+        repo: Target repository path.
+    """
+    return repo / CCX_DIR_NAME
+
+
+def runs_root(repo: Path) -> Path:
+    """Return the repository-local run state root.
+
+    Args:
+        repo: Target repository path.
+    """
+    return ccx_root(repo) / RUNS_DIR_NAME
+
+
+def run_state_root(repo: Path, run_id: str) -> Path:
+    """Return the state directory for a run.
+
+    Args:
+        repo: Target repository path.
+        run_id: Run identifier.
+    """
+    return runs_root(repo) / run_id
+
+
+def current_run_path(repo: Path) -> Path:
+    """Return the current-run pointer path.
+
+    Args:
+        repo: Target repository path.
+    """
+    return ccx_root(repo) / CURRENT_RUN_FILE
+
+
+def write_current_run(repo: Path, run_id: str) -> None:
+    """Persist the current run pointer.
+
+    Args:
+        repo: Target repository path.
+        run_id: Run identifier.
+    """
+    ccx_root(repo).mkdir(parents=True, exist_ok=True)
+    current_run_path(repo).write_text(run_id + "\n", encoding="utf-8")
+
+
+def read_current_run(repo: Path) -> str:
+    """Read the current run pointer.
+
+    Args:
+        repo: Target repository path.
+    """
+    path = current_run_path(repo)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def list_runs(repo: Path) -> list[str]:
+    """List known run identifiers.
+
+    Args:
+        repo: Target repository path.
+    """
+    root = runs_root(repo)
+    if not root.exists():
+        return []
+    return sorted(path.name for path in root.iterdir() if path.is_dir())
+
+
+def resolve_state_paths(repo: Path, run_id: str | None = None) -> StatePaths:
+    """Resolve the state directory for a run or compatibility state.
+
+    Args:
+        repo: Target repository path.
+        run_id: Optional run identifier.
+    """
+    root = git_root(repo)
+    selected_run = run_id or read_current_run(root)
+    if selected_run:
+        return StatePaths(root, run_state_root(root, selected_run))
+    legacy = StatePaths(root)
+    if legacy.root.exists():
+        return legacy
+    return StatePaths(root, legacy.root)
+
+
 def runtime_state_path(paths: StatePaths) -> Path:
     """Return the ccx runtime state file path.
 
@@ -171,27 +263,29 @@ def runtime_state_path(paths: StatePaths) -> Path:
     return paths.root / "run-state.json"
 
 
-def read_runtime_state(repo: Path) -> dict[str, Any]:
+def read_runtime_state(repo: Path, run_id: str | None = None) -> dict[str, Any]:
     """Read the ccx runtime state file.
 
     Args:
         repo: Target repository path.
+        run_id: Optional run identifier.
     """
-    paths = StatePaths(git_root(repo))
+    paths = resolve_state_paths(repo, run_id)
     state_path = runtime_state_path(paths)
     if not state_path.exists():
         return {}
     return json.loads(state_path.read_text(encoding="utf-8"))
 
 
-def write_runtime_state(repo: Path, state: dict[str, Any]) -> Path:
+def write_runtime_state(repo: Path, state: dict[str, Any], run_id: str | None = None) -> Path:
     """Write the ccx runtime state file.
 
     Args:
         repo: Target repository path.
         state: Runtime state payload.
+        run_id: Optional run identifier.
     """
-    paths = StatePaths(git_root(repo))
+    paths = resolve_state_paths(repo, run_id or state.get("run_id"))
     ensure_state_dirs(paths)
     state_path = runtime_state_path(paths)
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -392,7 +486,7 @@ def write_orchestrator_state(
         run_id: Run identifier.
         integration_worktree: Integration worktree path.
     """
-    paths = StatePaths(config.repo)
+    paths = StatePaths(config.repo, run_state_root(config.repo, run_id))
     if paths.root.exists() and any(paths.root.iterdir()) and not config.force_state:
         raise CliError(f"state already exists, pass --force-state to overwrite: {paths.root}")
     ensure_state_dirs(paths)
@@ -820,15 +914,16 @@ def runtime_counts(paths: StatePaths) -> dict[str, int]:
     }
 
 
-def runtime_status(repo: Path) -> dict[str, Any]:
+def runtime_status(repo: Path, run_id: str | None = None) -> dict[str, Any]:
     """Return current ccx runtime status.
 
     Args:
         repo: Target repository path.
+        run_id: Optional run identifier.
     """
     root = git_root(repo)
-    paths = StatePaths(root)
-    state = read_runtime_state(root)
+    paths = resolve_state_paths(root, run_id)
+    state = read_runtime_state(root, run_id)
     counts = runtime_counts(paths)
     return {
         "repo": str(root),
@@ -836,6 +931,8 @@ def runtime_status(repo: Path) -> dict[str, Any]:
         "has_state": bool(state),
         "status": state.get("status", "not-started"),
         "run_id": state.get("run_id", ""),
+        "current_run": read_current_run(root),
+        "runs": list_runs(root),
         "request": state.get("request", ""),
         "cmux_workspace": state.get("cmux_workspace", ""),
         "approved": paths.approval_file.exists(),
@@ -858,6 +955,10 @@ def format_runtime_status(status: dict[str, Any]) -> str:
     ]
     if status["run_id"]:
         lines.append(f"run: {status['run_id']}")
+    if status["current_run"]:
+        lines.append(f"current: {status['current_run']}")
+    if status["runs"]:
+        lines.append(f"runs: {', '.join(status['runs'])}")
     if status["cmux_workspace"]:
         lines.append(f"cmux workspace: {status['cmux_workspace']}")
     if status["request"]:
@@ -873,14 +974,15 @@ def format_runtime_status(status: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def print_runtime_status(repo: Path, *, as_json: bool = False) -> int:
+def print_runtime_status(repo: Path, *, as_json: bool = False, run_id: str | None = None) -> int:
     """Print current ccx runtime status.
 
     Args:
         repo: Target repository path.
         as_json: Whether to print JSON.
+        run_id: Optional run identifier.
     """
-    status = runtime_status(repo)
+    status = runtime_status(repo, run_id)
     if as_json:
         print(json.dumps(status, indent=2, sort_keys=True))
     else:
@@ -888,7 +990,14 @@ def print_runtime_status(repo: Path, *, as_json: bool = False) -> int:
     return 0
 
 
-def watch_runtime(repo: Path, *, interval: float, once: bool = False, max_ticks: int = 0) -> int:
+def watch_runtime(
+    repo: Path,
+    *,
+    interval: float,
+    once: bool = False,
+    max_ticks: int = 0,
+    run_id: str | None = None,
+) -> int:
     """Watch runtime status until interrupted.
 
     Args:
@@ -896,10 +1005,11 @@ def watch_runtime(repo: Path, *, interval: float, once: bool = False, max_ticks:
         interval: Poll interval in seconds.
         once: Whether to print one snapshot and exit.
         max_ticks: Optional maximum number of polling iterations.
+        run_id: Optional run identifier.
     """
     ticks = 0
     while True:
-        print(format_runtime_status(runtime_status(repo)))
+        print(format_runtime_status(runtime_status(repo, run_id)))
         ticks += 1
         if once or (max_ticks and ticks >= max_ticks):
             return 0
@@ -1018,35 +1128,38 @@ def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths)
     return workspace
 
 
-def resume_runtime(repo: Path) -> int:
+def resume_runtime(repo: Path, run_id: str | None = None) -> int:
     """Resume a previous ccx run in a new cmux workspace.
 
     Args:
         repo: Target repository path.
+        run_id: Optional run identifier.
     """
     root = git_root(repo)
-    paths = StatePaths(root)
-    state = read_runtime_state(root)
+    paths = resolve_state_paths(root, run_id)
+    state = read_runtime_state(root, run_id)
     if not state:
         raise CliError("no ccx runtime state found")
     workspace = launch_cmux_from_state(root, state, paths)
     state["status"] = "running"
     state["cmux_workspace"] = workspace
     state["resumed_at"] = datetime.now(UTC).isoformat()
-    write_runtime_state(root, state)
+    write_current_run(root, state["run_id"])
+    write_runtime_state(root, state, state["run_id"])
     print(f"resumed ccx workspace: {workspace}")
     return 0
 
 
-def stop_runtime(repo: Path, *, close_cmux: bool = False) -> int:
+def stop_runtime(repo: Path, *, close_cmux: bool = False, run_id: str | None = None) -> int:
     """Mark a ccx run as stopped and optionally close its cmux workspace.
 
     Args:
         repo: Target repository path.
         close_cmux: Whether to close the cmux workspace.
+        run_id: Optional run identifier.
     """
     root = git_root(repo)
-    state = read_runtime_state(root)
+    state = read_runtime_state(root, run_id)
     if not state:
         raise CliError("no ccx runtime state found")
     workspace = state.get("cmux_workspace")
@@ -1056,7 +1169,7 @@ def stop_runtime(repo: Path, *, close_cmux: bool = False) -> int:
         )
     state["status"] = "stopped"
     state["stopped_at"] = datetime.now(UTC).isoformat()
-    write_runtime_state(root, state)
+    write_runtime_state(root, state, state["run_id"])
     print("stopped ccx run")
     return 0
 
@@ -1093,7 +1206,7 @@ def run_orchestration(config: RunConfig) -> int:
         skip_launch=config.skip_launch,
         force_state=config.force_state,
     )
-    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
     run_id = f"{timestamp}-{slugify(config.request)}"
     worktree_root = config.repo.parent / ".ccx-worktrees" / config.repo.name / run_id
     integration_worktree = worktree_root / "integration"
@@ -1109,6 +1222,7 @@ def run_orchestration(config: RunConfig) -> int:
 
     ensure_git_exclude(config.repo, [".orchestrator/", ".ccx-worktrees/"])
     paths = write_orchestrator_state(config, plan, run_id, integration_worktree)
+    write_current_run(config.repo, run_id)
     print(f"ccx: wrote shared state to {paths.root}")
     state = {
         "status": "prepared",
@@ -1135,7 +1249,7 @@ def run_orchestration(config: RunConfig) -> int:
             for task in plan.tasks
         ],
     }
-    write_runtime_state(config.repo, state)
+    write_runtime_state(config.repo, state, run_id)
 
     create_worktrees(config.repo, run_id, plan, integration_worktree)
     print(f"ccx: created worktrees under {worktree_root}")
@@ -1151,7 +1265,7 @@ def run_orchestration(config: RunConfig) -> int:
     state["status"] = "running"
     state["cmux_workspace"] = workspace
     state["launched_at"] = datetime.now(UTC).isoformat()
-    write_runtime_state(config.repo, state)
+    write_runtime_state(config.repo, state, run_id)
     print(f"ccx: launched cmux workspace {workspace}")
     return 0
 

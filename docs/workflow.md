@@ -20,7 +20,7 @@ One-shot launch:
 ccx run "implement the requested feature"
 ```
 
-In run mode, Claude Opus plans the worker split, `ccx` creates the shared `.orchestrator` state and git worktrees, then cmux opens one Claude conductor pane and one Codex pane per worker.
+In run mode, Claude Opus plans the worker split, `ccx` creates run-scoped state under `.ccx/runs/<run-id>/` plus git worktrees, then cmux opens one Claude conductor pane and one Codex pane per worker. `.ccx/current-run` points to the most recent run, and runtime commands accept `--run <run-id>` for older concurrent runs.
 
 ```bash
 ./scripts/claude-codex init /path/to/target-repo feature-name 3

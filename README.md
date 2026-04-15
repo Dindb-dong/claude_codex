@@ -65,7 +65,7 @@ cd /path/to/your-repo
 ccx
 ```
 
-Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates `.orchestrator` state, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
+Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
 
 At the pre-launch prompt, type `/` to preview the Claude + ccx slash command setup.
 
@@ -95,6 +95,15 @@ ccx status [target-repo] [--json]
 ccx watch [target-repo] [--interval 2] [--once]
 ccx resume [target-repo]
 ccx stop [target-repo] [--close-cmux]
+```
+
+Multiple `ccx` runs can exist in the same repository. `ccx status` uses `.ccx/current-run` by default. Pass `--run <run-id>` to inspect or resume a specific run:
+
+```bash
+ccx status --run 20260415123456000000-feature
+ccx watch --run 20260415123456000000-feature --once
+ccx resume --run 20260415123456000000-feature
+ccx stop --run 20260415123456000000-feature
 ```
 
 Manual state commands:
@@ -134,7 +143,7 @@ export CCX_CODEX_EFFORT=medium
 
 ## Safety Rules
 
-- Workers must not edit files before `.orchestrator/approvals/approved.json` exists.
+- Workers must not edit files before the run approval barrier exists.
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - Same-file edits by multiple workers require explicit Claude arbitration.
 - `ccx stop` only marks state stopped by default. It closes cmux panes only with `--close-cmux`.
