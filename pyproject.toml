@@ -13,6 +13,7 @@ authors = [{ name = "Dindb-dong" }]
 
 [project.scripts]
 claude-codex = "claude_codex.cli:main"
+ccx = "claude_codex.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

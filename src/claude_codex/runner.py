@@ -7,11 +7,13 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from claude_codex.claude_commands import install_claude_commands
 from claude_codex.cli import CliError, StatePaths, ensure_state_dirs, write_text
 
 MAX_AUTO_WORKERS = 6
@@ -158,6 +160,42 @@ def ensure_git_exclude(repo: Path, patterns: list[str]) -> None:
                 handle.write("\n")
             for pattern in additions:
                 handle.write(f"{pattern}\n")
+
+
+def runtime_state_path(paths: StatePaths) -> Path:
+    """Return the ccx runtime state file path.
+
+    Args:
+        paths: Shared orchestration paths.
+    """
+    return paths.root / "run-state.json"
+
+
+def read_runtime_state(repo: Path) -> dict[str, Any]:
+    """Read the ccx runtime state file.
+
+    Args:
+        repo: Target repository path.
+    """
+    paths = StatePaths(git_root(repo))
+    state_path = runtime_state_path(paths)
+    if not state_path.exists():
+        return {}
+    return json.loads(state_path.read_text(encoding="utf-8"))
+
+
+def write_runtime_state(repo: Path, state: dict[str, Any]) -> Path:
+    """Write the ccx runtime state file.
+
+    Args:
+        repo: Target repository path.
+        state: Runtime state payload.
+    """
+    paths = StatePaths(git_root(repo))
+    ensure_state_dirs(paths)
+    state_path = runtime_state_path(paths)
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return state_path
 
 
 def collect_repo_snapshot(repo: Path) -> str:
@@ -756,6 +794,285 @@ def launch_cmux(
     return workspace
 
 
+def runtime_counts(paths: StatePaths) -> dict[str, int]:
+    """Count state files in the shared runtime directory.
+
+    Args:
+        paths: Shared orchestration paths.
+    """
+    tasks = list(paths.tasks.glob("*.md")) if paths.tasks.exists() else []
+    validations = list(paths.validations.glob("*.md")) if paths.validations.exists() else []
+    questions = [
+        path
+        for path in paths.questions.glob("*.md")
+        if paths.questions.exists() and path.parent == paths.questions
+    ]
+    resolved = (
+        list(paths.resolved_questions.glob("*.md")) if paths.resolved_questions.exists() else []
+    )
+    handoffs = list(paths.handoffs.glob("*.md")) if paths.handoffs.exists() else []
+    return {
+        "tasks": len(tasks),
+        "validations": len(validations),
+        "questions": len(questions),
+        "resolved_questions": len(resolved),
+        "handoffs": len(handoffs),
+    }
+
+
+def runtime_status(repo: Path) -> dict[str, Any]:
+    """Return current ccx runtime status.
+
+    Args:
+        repo: Target repository path.
+    """
+    root = git_root(repo)
+    paths = StatePaths(root)
+    state = read_runtime_state(root)
+    counts = runtime_counts(paths)
+    return {
+        "repo": str(root),
+        "state_dir": str(paths.root),
+        "has_state": bool(state),
+        "status": state.get("status", "not-started"),
+        "run_id": state.get("run_id", ""),
+        "request": state.get("request", ""),
+        "cmux_workspace": state.get("cmux_workspace", ""),
+        "approved": paths.approval_file.exists(),
+        "counts": counts,
+        "workers": state.get("workers", []),
+    }
+
+
+def format_runtime_status(status: dict[str, Any]) -> str:
+    """Format runtime status for terminal output.
+
+    Args:
+        status: Runtime status payload.
+    """
+    counts = status["counts"]
+    lines = [
+        f"repo: {status['repo']}",
+        f"state: {status['state_dir']}",
+        f"status: {status['status']}",
+    ]
+    if status["run_id"]:
+        lines.append(f"run: {status['run_id']}")
+    if status["cmux_workspace"]:
+        lines.append(f"cmux workspace: {status['cmux_workspace']}")
+    if status["request"]:
+        lines.append(f"request: {status['request']}")
+    lines.extend(
+        [
+            f"approved: {'yes' if status['approved'] else 'no'}",
+            f"validations: {counts['validations']}/{counts['tasks']}",
+            f"questions: {counts['questions']} open, {counts['resolved_questions']} resolved",
+            f"handoffs: {counts['handoffs']}/{counts['tasks']}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def print_runtime_status(repo: Path, *, as_json: bool = False) -> int:
+    """Print current ccx runtime status.
+
+    Args:
+        repo: Target repository path.
+        as_json: Whether to print JSON.
+    """
+    status = runtime_status(repo)
+    if as_json:
+        print(json.dumps(status, indent=2, sort_keys=True))
+    else:
+        print(format_runtime_status(status))
+    return 0
+
+
+def watch_runtime(repo: Path, *, interval: float, once: bool = False, max_ticks: int = 0) -> int:
+    """Watch runtime status until interrupted.
+
+    Args:
+        repo: Target repository path.
+        interval: Poll interval in seconds.
+        once: Whether to print one snapshot and exit.
+        max_ticks: Optional maximum number of polling iterations.
+    """
+    ticks = 0
+    while True:
+        print(format_runtime_status(runtime_status(repo)))
+        ticks += 1
+        if once or (max_ticks and ticks >= max_ticks):
+            return 0
+        print("")
+        time.sleep(interval)
+
+
+def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths) -> str:
+    """Relaunch conductor and worker panes from persisted state.
+
+    Args:
+        repo: Target repository path.
+        state: Runtime state payload.
+        paths: Shared state paths.
+    """
+    prompt_dir = paths.root / "prompts"
+    conductor_prompt_path = prompt_dir / "claude-conductor.md"
+    if not conductor_prompt_path.exists():
+        raise CliError(f"missing conductor prompt: {conductor_prompt_path}")
+    integration = state.get("integration", {})
+    integration_worktree = Path(integration.get("worktree", ""))
+    if not integration_worktree.exists():
+        raise CliError(f"missing integration worktree: {integration_worktree}")
+    models = state.get("models", {})
+    conductor_command = command_with_prompt(
+        [
+            "claude",
+            "--model",
+            str(models.get("claude") or "opus"),
+            "--effort",
+            str(models.get("claude_effort") or "medium"),
+            "--add-dir",
+            str(repo),
+            "--add-dir",
+            str(paths.root),
+        ],
+        conductor_prompt_path,
+    )
+    workspace_output = run_command(
+        [
+            "cmux",
+            "new-workspace",
+            "--name",
+            f"ccx {repo.name} resume",
+            "--cwd",
+            str(integration_worktree),
+            "--command",
+            conductor_command,
+        ],
+        cwd=repo,
+        timeout=30,
+    )
+    workspace = parse_ref_or_none(workspace_output, "workspace")
+    if not workspace:
+        workspace = run_command(["cmux", "current-workspace"], cwd=repo, timeout=30)
+
+    directions = ["right", "down", "right", "down", "right", "down"]
+    for index, worker in enumerate(state.get("workers", [])):
+        worker_id = str(worker.get("id"))
+        prompt_path = prompt_dir / f"{worker_id}.md"
+        worktree = Path(str(worker.get("worktree", "")))
+        if not prompt_path.exists() or not worktree.exists():
+            continue
+        pane_output = run_command(
+            [
+                "cmux",
+                "new-pane",
+                "--workspace",
+                workspace,
+                "--direction",
+                directions[index % len(directions)],
+            ],
+            cwd=repo,
+            timeout=30,
+        )
+        pane = parse_ref_or_none(pane_output, "pane")
+        if not pane:
+            panes_output = run_command(
+                ["cmux", "list-panes", "--workspace", workspace],
+                cwd=repo,
+                timeout=30,
+            )
+            pane = focused_pane_ref(panes_output)
+        surface_output = run_command(
+            ["cmux", "list-pane-surfaces", "--workspace", workspace, "--pane", pane],
+            cwd=repo,
+            timeout=30,
+        )
+        surface = first_surface_ref(surface_output)
+        codex_command = command_with_prompt(
+            [
+                "codex",
+                "--model",
+                str(models.get("codex") or "gpt-5.3-codex"),
+                "-c",
+                f'model_reasoning_effort="{models.get("codex_effort") or "medium"}"',
+                "--cd",
+                str(worktree),
+            ],
+            prompt_path,
+        )
+        run_command(
+            [
+                "cmux",
+                "respawn-pane",
+                "--workspace",
+                workspace,
+                "--surface",
+                surface,
+                "--command",
+                codex_command,
+            ],
+            cwd=repo,
+            timeout=30,
+        )
+    return workspace
+
+
+def resume_runtime(repo: Path) -> int:
+    """Resume a previous ccx run in a new cmux workspace.
+
+    Args:
+        repo: Target repository path.
+    """
+    root = git_root(repo)
+    paths = StatePaths(root)
+    state = read_runtime_state(root)
+    if not state:
+        raise CliError("no ccx runtime state found")
+    workspace = launch_cmux_from_state(root, state, paths)
+    state["status"] = "running"
+    state["cmux_workspace"] = workspace
+    state["resumed_at"] = datetime.now(UTC).isoformat()
+    write_runtime_state(root, state)
+    print(f"resumed ccx workspace: {workspace}")
+    return 0
+
+
+def stop_runtime(repo: Path, *, close_cmux: bool = False) -> int:
+    """Mark a ccx run as stopped and optionally close its cmux workspace.
+
+    Args:
+        repo: Target repository path.
+        close_cmux: Whether to close the cmux workspace.
+    """
+    root = git_root(repo)
+    state = read_runtime_state(root)
+    if not state:
+        raise CliError("no ccx runtime state found")
+    workspace = state.get("cmux_workspace")
+    if close_cmux and workspace:
+        run_command(
+            ["cmux", "close-workspace", "--workspace", str(workspace)], cwd=root, timeout=30
+        )
+    state["status"] = "stopped"
+    state["stopped_at"] = datetime.now(UTC).isoformat()
+    write_runtime_state(root, state)
+    print("stopped ccx run")
+    return 0
+
+
+def show_slash_menu() -> None:
+    """Print the ccx slash command preview for the pre-launch prompt."""
+    install_claude_commands()
+    print("Claude native slash commands remain available inside the conductor session.")
+    print("ccx commands are installed into Claude Code slash commands as:")
+    print("  /ccx-status   status(ccx): show orchestration state")
+    print("  /ccx-watch    watch(ccx): watch progress")
+    print("  /ccx-resume   resume(ccx): relaunch conductor/workers")
+    print("  /ccx-stop     stop(ccx): mark run stopped")
+    print("At this pre-launch prompt, enter a task request or /exit.")
+
+
 def run_orchestration(config: RunConfig) -> int:
     """Run the full interactive orchestration bootstrap.
 
@@ -763,6 +1080,7 @@ def run_orchestration(config: RunConfig) -> int:
         config: Runner configuration.
     """
     repo = git_root(config.repo)
+    install_claude_commands()
     config = RunConfig(
         repo=repo,
         request=config.request,
@@ -792,6 +1110,32 @@ def run_orchestration(config: RunConfig) -> int:
     ensure_git_exclude(config.repo, [".orchestrator/", ".ccx-worktrees/"])
     paths = write_orchestrator_state(config, plan, run_id, integration_worktree)
     print(f"ccx: wrote shared state to {paths.root}")
+    state = {
+        "status": "prepared",
+        "run_id": run_id,
+        "repo": str(config.repo),
+        "request": config.request,
+        "created_at": datetime.now(UTC).isoformat(),
+        "integration": {
+            "branch": f"ccx/{run_id}/integration",
+            "worktree": str(integration_worktree),
+        },
+        "models": {
+            "claude": config.claude_model,
+            "claude_effort": config.claude_effort,
+            "codex": config.codex_model,
+            "codex_effort": config.codex_effort,
+        },
+        "workers": [
+            {
+                "id": task.worker_id,
+                "branch": task.branch,
+                "worktree": str(task.worktree),
+            }
+            for task in plan.tasks
+        ],
+    }
+    write_runtime_state(config.repo, state)
 
     create_worktrees(config.repo, run_id, plan, integration_worktree)
     print(f"ccx: created worktrees under {worktree_root}")
@@ -804,18 +1148,32 @@ def run_orchestration(config: RunConfig) -> int:
         return 0
 
     workspace = launch_cmux(config, plan, paths, prompt_paths, run_id, integration_worktree)
+    state["status"] = "running"
+    state["cmux_workspace"] = workspace
+    state["launched_at"] = datetime.now(UTC).isoformat()
+    write_runtime_state(config.repo, state)
     print(f"ccx: launched cmux workspace {workspace}")
     return 0
 
 
 def prompt_for_request() -> str:
     """Prompt the user for the implementation request."""
+    install_claude_commands()
     print("ccx interactive orchestrator")
     print("Describe what you want Claude to plan and Codex workers to implement.")
-    try:
-        return input("ccx> ").strip()
-    except EOFError as exc:
-        raise CliError("request is required when stdin is not interactive") from exc
+    print('Type "/" to preview Claude + ccx slash commands.')
+    while True:
+        try:
+            request = input("ccx> ").strip()
+        except EOFError as exc:
+            raise CliError("request is required when stdin is not interactive") from exc
+        if request == "/":
+            show_slash_menu()
+            continue
+        if request in {"/exit", "/quit"}:
+            return ""
+        if request:
+            return request
 
 
 def interactive_default(cwd: Path) -> int:
