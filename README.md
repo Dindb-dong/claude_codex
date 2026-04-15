@@ -108,6 +108,8 @@ ccx stop --run 20260415123456000000-feature
 
 Launched Claude and Codex panes run through a lightweight `ccx agent` wrapper. Pressing `Ctrl-C` once in a conductor or worker pane interrupts the active Claude/Codex child process and marks the current ccx run as `stopped`. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux workspace.
 
+`Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated conductor and worker prompts include an interrupt recovery rule: before resuming after an explicit user interrupt, the agent checks `ccx status --run <run-id> --json`; if the run is still stale `running`, it first runs `ccx stop --run <run-id>`.
+
 Manual state commands:
 
 ```bash
@@ -149,6 +151,7 @@ export CCX_CODEX_EFFORT=medium
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - Same-file edits by multiple workers require explicit Claude arbitration.
 - `Ctrl-C` in a launched pane and `ccx stop` mark state stopped by default. They close cmux panes only with `--close-cmux`.
+- `Esc` is recovered by prompt protocol on resume: agents only stop stale `running` state when recovering from an explicit user interrupt.
 - Merge requires explicit human approval.
 
 ## Repository Layout

@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -216,6 +218,26 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_default_prompt_interrupt_exits_cleanly(self) -> None:
+        """Ctrl-C at the default prompt exits without a traceback."""
+        stderr = StringIO()
+
+        with patch("builtins.input", side_effect=KeyboardInterrupt), redirect_stderr(stderr):
+            exit_code = self.run_cli()
+
+        self.assertEqual(exit_code, 130)
+        self.assertIn("interrupted", stderr.getvalue())
+
+    def test_run_prompt_interrupt_exits_cleanly(self) -> None:
+        """Ctrl-C at the run prompt exits without a traceback."""
+        stderr = StringIO()
+
+        with patch("builtins.input", side_effect=KeyboardInterrupt), redirect_stderr(stderr):
+            exit_code = self.run_cli("run", "--repo", str(self.repo))
+
+        self.assertEqual(exit_code, 130)
+        self.assertIn("interrupted", stderr.getvalue())
+
     def test_run_skip_launch_uses_run_scoped_state(self) -> None:
         """run --skip-launch writes run-scoped state under .ccx/runs."""
         plan = {
@@ -252,6 +274,12 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(run_dirs[0].name, current_run)
         self.assertTrue((run_dirs[0] / "run-state.json").exists())
         self.assertFalse((self.repo / ".orchestrator").exists())
+        conductor_prompt = (run_dirs[0] / "prompts/claude-conductor.md").read_text(encoding="utf-8")
+        worker_prompt = (run_dirs[0] / "prompts/worker-01.md").read_text(encoding="utf-8")
+        resolved_repo = self.repo.resolve()
+        self.assertIn("Esc may interrupt Claude/Codex without notifying ccx", conductor_prompt)
+        self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
+        self.assertIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
 
     def test_status_supports_target_repo(self) -> None:
         """status prints runtime state for a target repository."""
