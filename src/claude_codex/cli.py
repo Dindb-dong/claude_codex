@@ -1,0 +1,692 @@
+"""Command line helpers for Claude conductor and Codex worker orchestration."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+STATE_DIR_NAME = ".orchestrator"
+RECOMMENDATIONS = {"approve", "revise", "reject"}
+WORKER_ID_PATTERN = re.compile(r"^worker-[0-9]{2}$")
+
+
+class CliError(Exception):
+    """Expected user-facing command failure."""
+
+
+@dataclass(frozen=True)
+class StatePaths:
+    """Resolved paths for an orchestration state directory.
+
+    Args:
+        repo: Target git repository path.
+    """
+
+    repo: Path
+
+    @property
+    def root(self) -> Path:
+        """Return the orchestration state root path."""
+        return self.repo / STATE_DIR_NAME
+
+    @property
+    def tasks(self) -> Path:
+        """Return the task directory path."""
+        return self.root / "tasks"
+
+    @property
+    def validations(self) -> Path:
+        """Return the validation directory path."""
+        return self.root / "validations"
+
+    @property
+    def approvals(self) -> Path:
+        """Return the approvals directory path."""
+        return self.root / "approvals"
+
+    @property
+    def questions(self) -> Path:
+        """Return the questions directory path."""
+        return self.root / "questions"
+
+    @property
+    def resolved_questions(self) -> Path:
+        """Return the resolved questions directory path."""
+        return self.questions / "resolved"
+
+    @property
+    def handoffs(self) -> Path:
+        """Return the handoffs directory path."""
+        return self.root / "handoffs"
+
+    @property
+    def approval_file(self) -> Path:
+        """Return the approval barrier file path."""
+        return self.approvals / "approved.json"
+
+
+def positive_int(value: str) -> int:
+    """Parse and validate a positive integer.
+
+    Args:
+        value: Raw CLI argument value.
+    """
+    try:
+        parsed = int(value, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    if parsed > 99:
+        raise argparse.ArgumentTypeError("must be 99 or less")
+    return parsed
+
+
+def validate_worker_id(worker_id: str) -> str:
+    """Validate a worker identifier.
+
+    Args:
+        worker_id: Candidate worker ID such as worker-01.
+    """
+    if not WORKER_ID_PATTERN.match(worker_id):
+        raise argparse.ArgumentTypeError("worker id must match worker-NN, for example worker-01")
+    return worker_id
+
+
+def resolve_repo(raw_path: str) -> Path:
+    """Resolve and validate a git repository path.
+
+    Args:
+        raw_path: CLI path to the target repository.
+    """
+    repo = Path(raw_path).expanduser().resolve()
+    if not repo.exists() or not repo.is_dir():
+        raise CliError(f"target repository does not exist: {repo}")
+    if not (repo / ".git").exists():
+        raise CliError(f"target repository is not a git repository: {repo}")
+    return repo
+
+
+def ensure_state_dirs(paths: StatePaths) -> None:
+    """Create the orchestration state directory tree.
+
+    Args:
+        paths: Resolved orchestration paths.
+    """
+    for directory in (
+        paths.tasks,
+        paths.validations,
+        paths.approvals,
+        paths.questions,
+        paths.resolved_questions,
+        paths.handoffs,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+def write_text(path: Path, content: str, *, force: bool = False) -> None:
+    """Write UTF-8 text while protecting existing files by default.
+
+    Args:
+        path: Destination file path.
+        content: Text content to write.
+        force: Whether to overwrite an existing file.
+    """
+    if path.exists() and not force:
+        raise CliError(f"refusing to overwrite existing file: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def bullet_list(items: list[str]) -> str:
+    """Render markdown bullet items.
+
+    Args:
+        items: Items to render.
+    """
+    if not items:
+        return "- None recorded\n"
+    return "".join(f"- {item}\n" for item in items)
+
+
+def task_content(worker_id: str) -> str:
+    """Create a worker task template.
+
+    Args:
+        worker_id: Worker identifier.
+    """
+    return f"""# Worker Task
+
+## Worker
+
+- ID: {worker_id}
+- Branch:
+- Worktree:
+
+## Objective
+
+
+## Owned Scope
+
+
+## Non-Goals
+
+
+## Validation Requirements
+
+1. Confirm this scope is coherent.
+2. Confirm this scope does not overlap with other workers.
+3. Identify missing context before implementation.
+
+## Implementation Requirements
+
+Do not edit code until .orchestrator/approvals/approved.json exists.
+
+## Required Tests
+
+
+## Handoff Path
+
+.orchestrator/handoffs/{worker_id}.md
+"""
+
+
+def parse_task_file(task_file: Path) -> dict[str, Any]:
+    """Parse basic metadata from a worker task file.
+
+    Args:
+        task_file: Task markdown file path.
+    """
+    metadata: dict[str, Any] = {
+        "id": task_file.stem,
+        "branch": "",
+        "worktree": "",
+        "scope": [],
+    }
+    in_scope = False
+    for raw_line in task_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            in_scope = line == "## Owned Scope"
+            continue
+        if line.startswith("- ID:"):
+            metadata["id"] = line.split(":", 1)[1].strip() or task_file.stem
+        elif line.startswith("- Branch:"):
+            metadata["branch"] = line.split(":", 1)[1].strip()
+        elif line.startswith("- Worktree:"):
+            metadata["worktree"] = line.split(":", 1)[1].strip()
+        elif in_scope and line.startswith("-"):
+            scope = line.lstrip("- ").strip()
+            if scope:
+                metadata["scope"].append(scope)
+    return metadata
+
+
+def list_markdown_files(directory: Path) -> list[Path]:
+    """List markdown files in a directory.
+
+    Args:
+        directory: Directory to scan.
+    """
+    if not directory.exists():
+        return []
+    return sorted(directory.glob("*.md"))
+
+
+def next_question_path(paths: StatePaths, worker_id: str) -> Path:
+    """Return the next numbered question file path for a worker.
+
+    Args:
+        paths: Resolved orchestration paths.
+        worker_id: Worker identifier.
+    """
+    existing = sorted(paths.questions.glob(f"{worker_id}-*.md"))
+    next_number = len(existing) + 1
+    return paths.questions / f"{worker_id}-{next_number:03d}.md"
+
+
+def resolve_question_name(question_name: str) -> str:
+    """Normalize a question file name while rejecting path traversal.
+
+    Args:
+        question_name: Question file name or stem from the CLI.
+    """
+    name = Path(question_name).name
+    if name != question_name:
+        raise argparse.ArgumentTypeError("question name must not include directories")
+    if not name.endswith(".md"):
+        name = f"{name}.md"
+    if not name.startswith("worker-") or not name.endswith(".md"):
+        raise argparse.ArgumentTypeError("question name must look like worker-NN-001.md")
+    return name
+
+
+def command_init(args: argparse.Namespace) -> int:
+    """Initialize orchestration state for a target repository.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = StatePaths(repo)
+    if paths.root.exists() and any(paths.root.iterdir()) and not args.force:
+        raise CliError(f"state already exists, pass --force to overwrite templates: {paths.root}")
+
+    ensure_state_dirs(paths)
+    plan = f"""# Orchestration Plan
+
+- Run: {args.run_name}
+- Target repo: {repo}
+- Worker count: {args.worker_count}
+- Status: planning
+
+## User Request
+
+
+## Decomposition
+
+
+## Integration Strategy
+
+
+"""
+    write_text(paths.root / "plan.md", plan, force=args.force)
+
+    worktrees = [
+        "# Worktrees\n\n",
+        "## Integration\n\n",
+        "- Branch:\n",
+        "- Path:\n\n",
+        "## Workers\n\n",
+    ]
+    for index in range(1, args.worker_count + 1):
+        worker_id = f"worker-{index:02d}"
+        write_text(paths.tasks / f"{worker_id}.md", task_content(worker_id), force=args.force)
+        worktrees.append(f"- {worker_id}: see .orchestrator/tasks/{worker_id}.md\n")
+    write_text(paths.root / "worktrees.md", "".join(worktrees), force=args.force)
+    print(f"created orchestration state: {paths.root}")
+    return 0
+
+
+def build_status(paths: StatePaths) -> dict[str, Any]:
+    """Build a machine-readable orchestration status object.
+
+    Args:
+        paths: Resolved orchestration paths.
+    """
+    task_files = list_markdown_files(paths.tasks)
+    validation_files = list_markdown_files(paths.validations)
+    question_files = list_markdown_files(paths.questions)
+    handoff_files = list_markdown_files(paths.handoffs)
+    validation_ids = {path.stem for path in validation_files}
+    handoff_ids = {path.stem for path in handoff_files}
+    worker_ids = [path.stem for path in task_files]
+    missing_validations = [worker_id for worker_id in worker_ids if worker_id not in validation_ids]
+    missing_handoffs = [worker_id for worker_id in worker_ids if worker_id not in handoff_ids]
+    return {
+        "repo": str(paths.repo),
+        "state_dir": str(paths.root),
+        "approved": paths.approval_file.exists(),
+        "task_count": len(task_files),
+        "validation_count": len(validation_files),
+        "question_count": len(question_files),
+        "handoff_count": len(handoff_files),
+        "resolved_question_count": len(list_markdown_files(paths.resolved_questions)),
+        "workers": worker_ids,
+        "missing_validations": missing_validations,
+        "missing_handoffs": missing_handoffs,
+        "questions": [path.name for path in question_files],
+    }
+
+
+def command_status(args: argparse.Namespace) -> int:
+    """Print orchestration status.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = StatePaths(repo)
+    if not paths.root.exists():
+        raise CliError(f"state directory does not exist: {paths.root}")
+    status = build_status(paths)
+    if args.json:
+        print(json.dumps(status, indent=2, sort_keys=True))
+        return 0
+
+    print(f"repo: {status['repo']}")
+    print(f"state: {status['state_dir']}")
+    print(f"approved: {'yes' if status['approved'] else 'no'}")
+    print(f"workers: {', '.join(status['workers']) if status['workers'] else 'none'}")
+    print(f"validations: {status['validation_count']}/{status['task_count']}")
+    print(f"questions: {status['question_count']}")
+    print(f"resolved questions: {status['resolved_question_count']}")
+    print(f"handoffs: {status['handoff_count']}/{status['task_count']}")
+    if status["missing_validations"]:
+        print("missing validations: " + ", ".join(status["missing_validations"]))
+    if status["questions"]:
+        print("open questions: " + ", ".join(status["questions"]))
+    if status["missing_handoffs"]:
+        print("missing handoffs: " + ", ".join(status["missing_handoffs"]))
+    return 0
+
+
+def command_check_barrier(args: argparse.Namespace) -> int:
+    """Check whether the approval barrier exists.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = StatePaths(repo)
+    if paths.approval_file.exists():
+        print(f"approved: {paths.approval_file}")
+        return 0
+    print(f"not approved: missing {paths.approval_file}")
+    return 1
+
+
+def command_approve(args: argparse.Namespace) -> int:
+    """Write the approval barrier after validations are complete.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = StatePaths(repo)
+    if not paths.root.exists():
+        raise CliError(f"state directory does not exist: {paths.root}")
+
+    task_files = list_markdown_files(paths.tasks)
+    if not task_files:
+        raise CliError("no worker tasks found")
+
+    status = build_status(paths)
+    if status["questions"] and not args.force:
+        raise CliError("open questions exist; resolve them or pass --force")
+    if status["missing_validations"] and not args.force:
+        missing = ", ".join(status["missing_validations"])
+        raise CliError(f"missing validations: {missing}")
+
+    workers = [parse_task_file(task_file) for task_file in task_files]
+    payload = {
+        "approved": True,
+        "approved_at": datetime.now(UTC).isoformat(),
+        "conductor": args.conductor,
+        "workers": workers,
+        "constraints": [
+            "Workers may edit only assigned scope.",
+            "Same-file edits across workers require conductor arbitration.",
+            "Workers must write handoffs before integration.",
+        ],
+    }
+    approval_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    write_text(paths.approval_file, approval_content, force=args.force)
+    print(f"wrote approval barrier: {paths.approval_file}")
+    return 0
+
+
+def command_question(args: argparse.Namespace) -> int:
+    """Create a worker question file.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = StatePaths(repo)
+    ensure_state_dirs(paths)
+    question_file = next_question_path(paths, args.worker_id)
+    content = f"""# Worker Question
+
+## Worker
+
+- ID: {args.worker_id}
+
+## Blocking Question
+
+{args.title}
+
+{args.body}
+
+## Why This Blocks Work
+
+{args.blocks}
+
+## Options
+
+{bullet_list(args.option)}
+
+## Recommended Resolution
+
+{args.recommendation}
+"""
+    write_text(question_file, content)
+    print(f"wrote question: {question_file}")
+    return 0
+
+
+def command_resolve_question(args: argparse.Namespace) -> int:
+    """Move an open question into the resolved question archive.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = StatePaths(repo)
+    ensure_state_dirs(paths)
+    source = paths.questions / args.question_name
+    if not source.exists():
+        raise CliError(f"question does not exist: {source}")
+    resolved_content = (
+        source.read_text(encoding="utf-8") + "\n## Conductor Resolution\n\n" + args.answer + "\n"
+    )
+    destination = paths.resolved_questions / args.question_name
+    write_text(destination, resolved_content, force=args.force)
+    source.unlink()
+    print(f"resolved question: {destination}")
+    return 0
+
+
+def command_validation(args: argparse.Namespace) -> int:
+    """Create or replace a worker validation file.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = StatePaths(repo)
+    ensure_state_dirs(paths)
+    validation_file = paths.validations / f"{args.worker_id}.md"
+    content = f"""# Worker Validation
+
+## Worker
+
+- ID: {args.worker_id}
+- Task file: .orchestrator/tasks/{args.worker_id}.md
+
+## Scope Coherence
+
+{args.scope_coherence}
+
+## Overlap Check
+
+{args.overlap_check}
+
+## Missing Context
+
+{args.missing_context}
+
+## Risks
+
+{bullet_list(args.risk)}
+
+## Questions
+
+{bullet_list(args.question)}
+
+## Recommendation
+
+{args.recommendation.title()}
+"""
+    write_text(validation_file, content, force=args.force)
+    print(f"wrote validation: {validation_file}")
+    return 0
+
+
+def command_handoff(args: argparse.Namespace) -> int:
+    """Create or replace a worker handoff file.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = StatePaths(repo)
+    ensure_state_dirs(paths)
+    handoff_file = paths.handoffs / f"{args.worker_id}.md"
+    content = f"""# Worker Handoff
+
+## Worker
+
+- ID: {args.worker_id}
+- Branch: {args.branch}
+- Worktree: {args.worktree}
+
+## Summary
+
+{args.summary}
+
+## Files Changed
+
+{bullet_list(args.file)}
+
+## Behavioral Changes
+
+{args.behavior}
+
+## Tests Run
+
+{bullet_list(args.test)}
+
+## Risks
+
+{bullet_list(args.risk)}
+
+## Integration Notes
+
+{args.integration_notes}
+"""
+    write_text(handoff_file, content, force=args.force)
+    print(f"wrote handoff: {handoff_file}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
+    parser = argparse.ArgumentParser(prog="claude-codex")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = subparsers.add_parser("init", help="initialize orchestration state")
+    init_parser.add_argument("target_repo")
+    init_parser.add_argument("run_name")
+    init_parser.add_argument("worker_count", type=positive_int)
+    init_parser.add_argument("--force", action="store_true", help="overwrite generated templates")
+    init_parser.set_defaults(func=command_init)
+
+    status_parser = subparsers.add_parser("status", help="show orchestration status")
+    status_parser.add_argument("target_repo")
+    status_parser.add_argument("--json", action="store_true", help="print JSON status")
+    status_parser.set_defaults(func=command_status)
+
+    barrier_parser = subparsers.add_parser("check-barrier", help="check approval barrier")
+    barrier_parser.add_argument("target_repo")
+    barrier_parser.set_defaults(func=command_check_barrier)
+
+    approve_parser = subparsers.add_parser("approve", help="write approval barrier")
+    approve_parser.add_argument("target_repo")
+    approve_parser.add_argument("--conductor", default="claude")
+    approve_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="ignore questions/missing validations",
+    )
+    approve_parser.set_defaults(func=command_approve)
+
+    question_parser = subparsers.add_parser("question", help="write a worker question")
+    question_parser.add_argument("target_repo")
+    question_parser.add_argument("worker_id", type=validate_worker_id)
+    question_parser.add_argument("--title", required=True)
+    question_parser.add_argument("--body", required=True)
+    question_parser.add_argument(
+        "--blocks",
+        default="The worker needs conductor arbitration before proceeding.",
+    )
+    question_parser.add_argument("--option", action="append", default=[])
+    question_parser.add_argument("--recommendation", default="Wait for conductor decision.")
+    question_parser.set_defaults(func=command_question)
+
+    resolve_parser = subparsers.add_parser(
+        "resolve-question",
+        help="mark a worker question as resolved",
+    )
+    resolve_parser.add_argument("target_repo")
+    resolve_parser.add_argument("question_name", type=resolve_question_name)
+    resolve_parser.add_argument("--answer", required=True)
+    resolve_parser.add_argument("--force", action="store_true")
+    resolve_parser.set_defaults(func=command_resolve_question)
+
+    validation_parser = subparsers.add_parser("validation", help="write a worker validation")
+    validation_parser.add_argument("target_repo")
+    validation_parser.add_argument("worker_id", type=validate_worker_id)
+    validation_parser.add_argument("--scope-coherence", required=True)
+    validation_parser.add_argument("--overlap-check", required=True)
+    validation_parser.add_argument("--missing-context", default="None identified.")
+    validation_parser.add_argument("--risk", action="append", default=[])
+    validation_parser.add_argument("--question", action="append", default=[])
+    validation_parser.add_argument(
+        "--recommendation",
+        choices=sorted(RECOMMENDATIONS),
+        required=True,
+    )
+    validation_parser.add_argument("--force", action="store_true")
+    validation_parser.set_defaults(func=command_validation)
+
+    handoff_parser = subparsers.add_parser("handoff", help="write a worker handoff")
+    handoff_parser.add_argument("target_repo")
+    handoff_parser.add_argument("worker_id", type=validate_worker_id)
+    handoff_parser.add_argument("--branch", required=True)
+    handoff_parser.add_argument("--worktree", required=True)
+    handoff_parser.add_argument("--summary", required=True)
+    handoff_parser.add_argument("--file", action="append", default=[])
+    handoff_parser.add_argument("--behavior", default="No behavioral changes recorded.")
+    handoff_parser.add_argument("--test", action="append", default=[])
+    handoff_parser.add_argument("--risk", action="append", default=[])
+    handoff_parser.add_argument("--integration-notes", default="No special integration notes.")
+    handoff_parser.add_argument("--force", action="store_true")
+    handoff_parser.set_defaults(func=command_handoff)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the claude-codex CLI.
+
+    Args:
+        argv: Optional argument vector, excluding executable name.
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except CliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

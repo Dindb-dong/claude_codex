@@ -1,5 +1,21 @@
 # Workflow
 
+
+## MVP CLI
+
+The local CLI enforces the state-file protocol before cmux/omx automation is added.
+
+```bash
+./scripts/claude-codex init /path/to/target-repo feature-name 3
+./scripts/claude-codex status /path/to/target-repo
+./scripts/claude-codex validation /path/to/target-repo worker-01 --scope-coherence "Scope is coherent." --overlap-check "No overlap." --recommendation approve
+./scripts/claude-codex resolve-question /path/to/target-repo worker-01-001 --answer "Conductor decision."
+./scripts/claude-codex approve /path/to/target-repo
+./scripts/claude-codex handoff /path/to/target-repo worker-01 --branch worker/feature --worktree /path/to/worktree --summary "Done"
+```
+
+Approval is blocked when validations are missing or unresolved question files exist. Resolve questions with `resolve-question`, or pass `--force` only for an intentional override.
+
 ## Phase 0: Setup
 
 1. Confirm GitHub authentication and target repository status.

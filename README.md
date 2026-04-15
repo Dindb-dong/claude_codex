@@ -28,16 +28,66 @@ Reduce expensive Claude execution loops by using Claude only for planning, arbit
 - `prompts/claude-conductor.md`: prompt for the Claude conductor pane.
 - `prompts/codex-worker.md`: prompt for each Codex worker pane.
 - `templates/`: task, validation, question, and handoff templates.
-- `scripts/bootstrap-run.sh`: creates a local orchestration state directory for a run.
+- `src/claude_codex/`: dependency-free MVP CLI.
+- `scripts/claude-codex`: local CLI wrapper.
+- `scripts/bootstrap-run.sh`: compatibility wrapper for `claude-codex init`.
 
 ## Quick Start
 
+Initialize orchestration state in a target git repository:
+
 ```bash
 cd /Users/maxkim/claude_codex
-./scripts/bootstrap-run.sh /path/to/target-repo feature-name 3
+./scripts/claude-codex init /path/to/target-repo feature-name 3
+```
+
+Check status:
+
+```bash
+./scripts/claude-codex status /path/to/target-repo
+```
+
+Workers write validation files before implementation:
+
+```bash
+./scripts/claude-codex validation /path/to/target-repo worker-01 \
+  --scope-coherence "Scope is coherent." \
+  --overlap-check "No overlap with other workers." \
+  --recommendation approve
+```
+
+Claude writes the approval barrier only after validations are complete and questions are resolved:
+
+```bash
+./scripts/claude-codex approve /path/to/target-repo
+./scripts/claude-codex check-barrier /path/to/target-repo
+```
+
+Workers write handoffs when finished:
+
+```bash
+./scripts/claude-codex handoff /path/to/target-repo worker-01 \
+  --branch worker/feature-area \
+  --worktree /path/to/worktree \
+  --summary "Implemented assigned task." \
+  --file src/example.py \
+  --test "python -m unittest"
 ```
 
 Then start `cmux omx` or open Claude/Codex panes manually and paste the conductor/worker prompts.
+
+## CLI Commands
+
+```text
+claude-codex init <target-repo> <run-name> <worker-count>
+claude-codex status <target-repo> [--json]
+claude-codex validation <target-repo> <worker-id> ...
+claude-codex question <target-repo> <worker-id> ...
+claude-codex resolve-question <target-repo> <question-name> --answer "..."
+claude-codex approve <target-repo> [--force]
+claude-codex check-barrier <target-repo>
+claude-codex handoff <target-repo> <worker-id> ...
+```
 
 ## Safety Rules
 
@@ -45,3 +95,17 @@ Then start `cmux omx` or open Claude/Codex panes manually and paste the conducto
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - Same-file edits by multiple workers require explicit Claude arbitration.
 - Merge requires explicit human approval.
+
+## Development
+
+Run tests:
+
+```bash
+PYTHONPATH=src python3 -m unittest -v
+```
+
+Run the local CLI:
+
+```bash
+./scripts/claude-codex --help
+```
