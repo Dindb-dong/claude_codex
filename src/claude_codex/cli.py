@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -417,6 +418,31 @@ def command_install_claude_commands(_: argparse.Namespace) -> int:
     return 0
 
 
+def command_doctor(_: argparse.Namespace) -> int:
+    """Check whether required external CLIs are available.
+
+    Args:
+        _: Parsed CLI arguments.
+    """
+    checks = {
+        "git": shutil.which("git"),
+        "cmux": shutil.which("cmux"),
+        "claude": shutil.which("claude"),
+        "codex": shutil.which("codex"),
+    }
+    failed = False
+    for name, path in checks.items():
+        if path:
+            print(f"[OK] {name}: {path}")
+        else:
+            print(f"[!!] {name}: not found in PATH")
+            failed = True
+    if failed:
+        return 1
+    print("ccx doctor: all required commands found")
+    return 0
+
+
 def command_check_barrier(args: argparse.Namespace) -> int:
     """Check whether the approval barrier exists.
 
@@ -684,6 +710,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="install ccx commands into Claude Code slash commands",
     )
     install_commands_parser.set_defaults(func=command_install_claude_commands)
+
+    doctor_parser = subparsers.add_parser("doctor", help="check required external CLIs")
+    doctor_parser.set_defaults(func=command_doctor)
 
     init_parser = subparsers.add_parser("init", help="initialize orchestration state")
     init_parser.add_argument("target_repo")

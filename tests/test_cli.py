@@ -225,6 +225,12 @@ class CliTestCase(unittest.TestCase):
         self.assertTrue(command_file.exists())
         self.assertIn("status(ccx)", command_file.read_text(encoding="utf-8"))
 
+    def test_doctor_runs(self) -> None:
+        """doctor returns a process status after checking external commands."""
+        exit_code = self.run_cli("doctor")
+
+        self.assertIn(exit_code, {0, 1})
+
 
 if __name__ == "__main__":
     unittest.main()

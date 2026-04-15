@@ -1,12 +1,79 @@
-# claude_codex
+# claude-codex (`ccx`)
 
-Claude conductor + Codex worker orchestration kit for `cmux` and `oh-my-codex` workflows.
+`ccx` is a local orchestration CLI for teams who use **cmux + Claude Code + OpenAI Codex CLI**. It launches Claude as the conductor and Codex workers as implementation agents in isolated git worktrees.
 
-This repository defines the operating protocol for using Claude Opus as the planner/reviewer and Codex workers as implementation agents in isolated git worktrees.
+The goal is to spend Claude on planning, arbitration, review, and integration while Codex handles implementation-heavy loops.
 
-## Goal
+## Requirements
 
-Reduce expensive Claude execution loops by using Claude only for planning, arbitration, integration review, and final verification while Codex workers handle implementation and tests.
+Install these first:
+
+- `git`
+- `cmux`
+- `claude` from Claude Code
+- `codex` from OpenAI Codex CLI
+- Python 3.11+
+
+Check your environment after installation:
+
+```bash
+ccx doctor
+```
+
+## Install
+
+Clone the repository and install editable mode:
+
+```bash
+git clone https://github.com/Dindb-dong/claude_codex.git
+cd claude_codex
+python3 -m pip install -e .
+ccx install-claude-commands
+ccx doctor
+```
+
+Or run the helper script:
+
+```bash
+./scripts/install-local.sh
+```
+
+This installs two console commands:
+
+```text
+ccx
+claude-codex
+```
+
+It also installs Claude Code user slash commands into `~/.claude/commands/`:
+
+```text
+/ccx-status   status(ccx): show orchestration state
+/ccx-watch    watch(ccx): watch progress
+/ccx-resume   resume(ccx): relaunch conductor/workers
+/ccx-stop     stop(ccx): mark run stopped
+```
+
+Claude native slash commands remain available. The ccx commands are namespaced to avoid collisions with Claude commands such as `/status`, `/model`, and `/help`.
+
+## Quick Start
+
+Run `ccx` inside the repository you want to work on:
+
+```bash
+cd /path/to/your-repo
+ccx
+```
+
+Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates `.orchestrator` state, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
+
+At the pre-launch prompt, type `/` to preview the Claude + ccx slash command setup.
+
+One-shot form:
+
+```bash
+ccx run "implement the requested feature"
+```
 
 ## Core Protocol
 
@@ -21,84 +88,28 @@ Reduce expensive Claude execution loops by using Claude only for planning, arbit
 9. Claude reviews handoffs, integrates branches, resolves conflicts, and runs checks.
 10. Claude splits commits, pushes, opens a PR, and waits for explicit human approval before merge.
 
-## Repository Layout
-
-- `docs/architecture.md`: system model and responsibilities.
-- `docs/workflow.md`: end-to-end operating flow.
-- `prompts/claude-conductor.md`: prompt for the Claude conductor pane.
-- `prompts/codex-worker.md`: prompt for each Codex worker pane.
-- `templates/`: task, validation, question, and handoff templates.
-- `src/claude_codex/`: dependency-free MVP CLI.
-- `scripts/claude-codex`: local CLI wrapper.
-- `scripts/bootstrap-run.sh`: compatibility wrapper for `claude-codex init`.
-
-## Quick Start
-
-Install a global local command:
+## Runtime Commands
 
 ```bash
-ln -sfn /Users/maxkim/claude_codex/scripts/claude-codex ~/.local/bin/claude-codex
-ln -sfn /Users/maxkim/claude_codex/scripts/claude-codex ~/.local/bin/ccx
+ccx status [target-repo] [--json]
+ccx watch [target-repo] [--interval 2] [--once]
+ccx resume [target-repo]
+ccx stop [target-repo] [--close-cmux]
 ```
 
-After that, `claude-codex` and the shorter `ccx` alias work from any directory as long as `~/.local/bin` is in `PATH`.
-
-Launch the interactive orchestrator from the repository you want to work on:
+Manual state commands:
 
 ```bash
-cd /Users/maxkim/leviosa-frontend
-ccx
-```
-
-Then type the request. `ccx` asks Claude Opus to decide the worker split, creates `.orchestrator` state, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
-
-Typing `/` at the pre-launch prompt previews the Claude + ccx slash command setup. The actual conductor is a normal Claude Code session, so Claude native slash commands remain available. ccx also installs these user-level Claude slash commands:
-
-- `/ccx-status`: `status(ccx)`
-- `/ccx-watch`: `watch(ccx)`
-- `/ccx-resume`: `resume(ccx)`
-- `/ccx-stop`: `stop(ccx)`
-
-Equivalent one-shot form:
-
-```bash
-cd /Users/maxkim/leviosa-frontend
-ccx run "implement the requested feature"
-```
-
-Initialize orchestration state in a target git repository:
-
-```bash
-cd /Users/maxkim/claude_codex
-ccx init /path/to/target-repo feature-name 3
-```
-
-Check status:
-
-```bash
-ccx status /path/to/target-repo
-```
-
-Workers write validation files before implementation:
-
-```bash
-ccx validation /path/to/target-repo worker-01 \
+ccx init <target-repo> <run-name> <worker-count>
+ccx validation <target-repo> <worker-id> \
   --scope-coherence "Scope is coherent." \
   --overlap-check "No overlap with other workers." \
   --recommendation approve
-```
-
-Claude writes the approval barrier only after validations are complete and questions are resolved:
-
-```bash
-ccx approve /path/to/target-repo
-ccx check-barrier /path/to/target-repo
-```
-
-Workers write handoffs when finished:
-
-```bash
-ccx handoff /path/to/target-repo worker-01 \
+ccx question <target-repo> <worker-id> --title "Question" --body "Details"
+ccx resolve-question <target-repo> <question-name> --answer "Decision"
+ccx approve <target-repo>
+ccx check-barrier <target-repo>
+ccx handoff <target-repo> <worker-id> \
   --branch worker/feature-area \
   --worktree /path/to/worktree \
   --summary "Implemented assigned task." \
@@ -106,40 +117,40 @@ ccx handoff /path/to/target-repo worker-01 \
   --test "python -m unittest"
 ```
 
-Then start `cmux omx` or open Claude/Codex panes manually and paste the conductor/worker prompts.
-
-## CLI Commands
-
-```text
-claude-codex run [request...] [--repo .] [--workers N] [--dry-run] [--skip-launch]
-claude-codex install-claude-commands
-claude-codex init <target-repo> <run-name> <worker-count>
-claude-codex status [target-repo] [--json]
-claude-codex watch [target-repo] [--interval seconds] [--once]
-claude-codex resume [target-repo]
-claude-codex stop [target-repo] [--close-cmux]
-claude-codex validation <target-repo> <worker-id> ...
-claude-codex question <target-repo> <worker-id> ...
-claude-codex resolve-question <target-repo> <question-name> --answer "..."
-claude-codex approve <target-repo> [--force]
-claude-codex check-barrier <target-repo>
-claude-codex handoff <target-repo> <worker-id> ...
-```
-
-`ccx` is an equivalent short alias for every command above.
-
-Default model settings:
+## Default Models
 
 - Claude conductor: `opus`, effort `medium`.
 - Codex workers: `gpt-5.3-codex`, reasoning effort `medium`.
 - Human label `normal` is treated as `medium` internally because the installed CLIs accept `medium`, not `normal`.
+
+Environment overrides:
+
+```bash
+export CCX_CLAUDE_MODEL=opus
+export CCX_CLAUDE_EFFORT=medium
+export CCX_CODEX_MODEL=gpt-5.3-codex
+export CCX_CODEX_EFFORT=medium
+```
 
 ## Safety Rules
 
 - Workers must not edit files before `.orchestrator/approvals/approved.json` exists.
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - Same-file edits by multiple workers require explicit Claude arbitration.
+- `ccx stop` only marks state stopped by default. It closes cmux panes only with `--close-cmux`.
 - Merge requires explicit human approval.
+
+## Repository Layout
+
+- `docs/architecture.md`: system model and responsibilities.
+- `docs/workflow.md`: end-to-end operating flow.
+- `prompts/claude-conductor.md`: prompt for the Claude conductor pane.
+- `prompts/codex-worker.md`: prompt for each Codex worker pane.
+- `templates/`: task, validation, question, and handoff templates.
+- `src/claude_codex/`: Python CLI implementation.
+- `scripts/install-local.sh`: editable install + Claude command install + doctor.
+- `scripts/claude-codex`: local wrapper for repo development.
+- `scripts/bootstrap-run.sh`: compatibility wrapper for `claude-codex init`.
 
 ## Development
 
@@ -149,7 +160,14 @@ Run tests:
 PYTHONPATH=src python3 -m unittest -v
 ```
 
-Run the local CLI:
+Run lint/format:
+
+```bash
+ruff format .
+ruff check .
+```
+
+Run the local wrapper without installing:
 
 ```bash
 ./scripts/claude-codex --help
