@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -257,6 +258,75 @@ class CliTestCase(unittest.TestCase):
         exit_code = self.run_cli("status", str(self.repo))
 
         self.assertEqual(exit_code, 0)
+
+    def test_agent_command_wraps_child_with_prompt(self) -> None:
+        """agent runs a child command with the prompt appended."""
+        prompt_path = self.repo / "prompt.md"
+        prompt_path.write_text("hello agent\n", encoding="utf-8")
+
+        exit_code = self.run_cli(
+            "agent",
+            "--repo",
+            str(self.repo),
+            "--run",
+            "run-1",
+            "--role",
+            "conductor",
+            "--prompt",
+            str(prompt_path),
+            "--",
+            sys.executable,
+            "-c",
+            "import sys; raise SystemExit(0 if sys.argv[-1] == 'hello agent\\n' else 2)",
+        )
+
+        self.assertEqual(exit_code, 0)
+
+    def test_agent_worker_requires_worker_id(self) -> None:
+        """worker wrappers require an explicit worker id."""
+        prompt_path = self.repo / "prompt.md"
+        prompt_path.write_text("hello agent\n", encoding="utf-8")
+
+        exit_code = self.run_cli(
+            "agent",
+            "--repo",
+            str(self.repo),
+            "--run",
+            "run-1",
+            "--role",
+            "worker",
+            "--prompt",
+            str(prompt_path),
+            "--",
+            sys.executable,
+            "-c",
+            "raise SystemExit(0)",
+        )
+
+        self.assertEqual(exit_code, 1)
+
+    def test_mark_runtime_stopped_records_signal_metadata(self) -> None:
+        """signal stop metadata is persisted in the run state."""
+        from claude_codex.runner import mark_runtime_stopped, write_current_run, write_runtime_state
+
+        run_id = "20260416000000000000-test"
+        write_current_run(self.repo, run_id)
+        write_runtime_state(self.repo, {"run_id": run_id, "status": "running"}, run_id)
+
+        mark_runtime_stopped(
+            self.repo,
+            run_id=run_id,
+            stopped_by="signal",
+            stop_reason="SIGINT",
+            stopped_agent="worker:worker-01",
+        )
+
+        state_path = self.repo / ".ccx/runs" / run_id / "run-state.json"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "stopped")
+        self.assertEqual(payload["stopped_by"], "signal")
+        self.assertEqual(payload["stop_reason"], "SIGINT")
+        self.assertEqual(payload["stopped_agent"], "worker:worker-01")
 
     def test_install_claude_commands_writes_user_commands(self) -> None:
         """install-claude-commands writes ccx slash commands under ~/.claude."""

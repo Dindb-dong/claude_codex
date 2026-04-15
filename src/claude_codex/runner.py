@@ -6,8 +6,11 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
+import sys
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +24,7 @@ EFFORT_ALIASES = {"normal": "medium", "med": "medium"}
 CCX_DIR_NAME = ".ccx"
 RUNS_DIR_NAME = "runs"
 CURRENT_RUN_FILE = "current-run"
+DEFAULT_CCX_BIN = "ccx"
 
 
 @dataclass(frozen=True)
@@ -716,14 +720,46 @@ def write_prompt_files(
     return prompt_paths
 
 
-def command_with_prompt(base_command: list[str], prompt_path: Path) -> str:
-    """Build a shell command that injects a prompt file as one argument.
+def ccx_executable() -> str:
+    """Return the ccx executable used inside launched cmux panes."""
+    return os.environ.get("CCX_BIN", DEFAULT_CCX_BIN)
+
+
+def agent_command_with_prompt(
+    *,
+    repo: Path,
+    run_id: str,
+    role: str,
+    prompt_path: Path,
+    child_command: list[str],
+    worker_id: str | None = None,
+) -> str:
+    """Build a shell command that runs a child agent through the ccx wrapper.
 
     Args:
-        base_command: Command arguments before the prompt.
+        repo: Target repository path used for run state updates.
+        run_id: Run identifier.
+        role: Agent role, such as conductor or worker.
         prompt_path: Prompt file to read at runtime.
+        child_command: Claude or Codex command arguments before the prompt.
+        worker_id: Optional worker identifier.
     """
-    return f'{shlex.join(base_command)} "$(cat {shlex.quote(str(prompt_path))})"'
+    command = [
+        ccx_executable(),
+        "agent",
+        "--repo",
+        str(repo),
+        "--run",
+        run_id,
+        "--role",
+        role,
+        "--prompt",
+        str(prompt_path),
+    ]
+    if worker_id:
+        command.extend(["--worker-id", worker_id])
+    command.extend(["--", *child_command])
+    return shlex.join(command)
 
 
 def parse_ref(output: str, prefix: str) -> str:
@@ -799,8 +835,12 @@ def launch_cmux(
         run_id: Run identifier.
         integration_worktree: Integration worktree path.
     """
-    conductor_command = command_with_prompt(
-        [
+    conductor_command = agent_command_with_prompt(
+        repo=config.repo,
+        run_id=run_id,
+        role="conductor",
+        prompt_path=prompt_paths["conductor"],
+        child_command=[
             "claude",
             "--model",
             config.claude_model,
@@ -811,7 +851,6 @@ def launch_cmux(
             "--add-dir",
             str(paths.root),
         ],
-        prompt_paths["conductor"],
     )
     workspace_output = run_command(
         [
@@ -859,8 +898,13 @@ def launch_cmux(
             timeout=30,
         )
         surface = first_surface_ref(surface_output)
-        codex_command = command_with_prompt(
-            [
+        codex_command = agent_command_with_prompt(
+            repo=config.repo,
+            run_id=run_id,
+            role="worker",
+            worker_id=task.worker_id,
+            prompt_path=prompt_paths[task.worker_id],
+            child_command=[
                 "codex",
                 "--model",
                 config.codex_model,
@@ -869,7 +913,6 @@ def launch_cmux(
                 "--cd",
                 str(task.worktree),
             ],
-            prompt_paths[task.worker_id],
         )
         run_command(
             [
@@ -935,6 +978,10 @@ def runtime_status(repo: Path, run_id: str | None = None) -> dict[str, Any]:
         "runs": list_runs(root),
         "request": state.get("request", ""),
         "cmux_workspace": state.get("cmux_workspace", ""),
+        "stopped_at": state.get("stopped_at", ""),
+        "stopped_by": state.get("stopped_by", ""),
+        "stop_reason": state.get("stop_reason", ""),
+        "stopped_agent": state.get("stopped_agent", ""),
         "approved": paths.approval_file.exists(),
         "counts": counts,
         "workers": state.get("workers", []),
@@ -961,6 +1008,15 @@ def format_runtime_status(status: dict[str, Any]) -> str:
         lines.append(f"runs: {', '.join(status['runs'])}")
     if status["cmux_workspace"]:
         lines.append(f"cmux workspace: {status['cmux_workspace']}")
+    if status["stopped_at"]:
+        lines.append(f"stopped at: {status['stopped_at']}")
+    if status["stopped_by"]:
+        detail = status["stopped_by"]
+        if status["stop_reason"]:
+            detail += f" ({status['stop_reason']})"
+        if status["stopped_agent"]:
+            detail += f" by {status['stopped_agent']}"
+        lines.append(f"stopped by: {detail}")
     if status["request"]:
         lines.append(f"request: {status['request']}")
     lines.extend(
@@ -1034,8 +1090,15 @@ def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths)
     if not integration_worktree.exists():
         raise CliError(f"missing integration worktree: {integration_worktree}")
     models = state.get("models", {})
-    conductor_command = command_with_prompt(
-        [
+    run_id = str(state.get("run_id") or read_current_run(repo))
+    if not run_id:
+        raise CliError("missing run id in runtime state")
+    conductor_command = agent_command_with_prompt(
+        repo=repo,
+        run_id=run_id,
+        role="conductor",
+        prompt_path=conductor_prompt_path,
+        child_command=[
             "claude",
             "--model",
             str(models.get("claude") or "opus"),
@@ -1046,7 +1109,6 @@ def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths)
             "--add-dir",
             str(paths.root),
         ],
-        conductor_prompt_path,
     )
     workspace_output = run_command(
         [
@@ -1099,8 +1161,13 @@ def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths)
             timeout=30,
         )
         surface = first_surface_ref(surface_output)
-        codex_command = command_with_prompt(
-            [
+        codex_command = agent_command_with_prompt(
+            repo=repo,
+            run_id=run_id,
+            role="worker",
+            worker_id=worker_id,
+            prompt_path=prompt_path,
+            child_command=[
                 "codex",
                 "--model",
                 str(models.get("codex") or "gpt-5.3-codex"),
@@ -1109,7 +1176,6 @@ def launch_cmux_from_state(repo: Path, state: dict[str, Any], paths: StatePaths)
                 "--cd",
                 str(worktree),
             ],
-            prompt_path,
         )
         run_command(
             [
@@ -1150,13 +1216,24 @@ def resume_runtime(repo: Path, run_id: str | None = None) -> int:
     return 0
 
 
-def stop_runtime(repo: Path, *, close_cmux: bool = False, run_id: str | None = None) -> int:
+def mark_runtime_stopped(
+    repo: Path,
+    *,
+    close_cmux: bool = False,
+    run_id: str | None = None,
+    stopped_by: str = "cli",
+    stop_reason: str = "",
+    stopped_agent: str = "",
+) -> dict[str, Any]:
     """Mark a ccx run as stopped and optionally close its cmux workspace.
 
     Args:
         repo: Target repository path.
         close_cmux: Whether to close the cmux workspace.
         run_id: Optional run identifier.
+        stopped_by: Actor or mechanism that stopped the run.
+        stop_reason: Optional machine-readable stop reason.
+        stopped_agent: Optional agent label that observed the stop.
     """
     root = git_root(repo)
     state = read_runtime_state(root, run_id)
@@ -1169,9 +1246,119 @@ def stop_runtime(repo: Path, *, close_cmux: bool = False, run_id: str | None = N
         )
     state["status"] = "stopped"
     state["stopped_at"] = datetime.now(UTC).isoformat()
+    state["stopped_by"] = stopped_by
+    if stop_reason:
+        state["stop_reason"] = stop_reason
+    if stopped_agent:
+        state["stopped_agent"] = stopped_agent
     write_runtime_state(root, state, state["run_id"])
+    return state
+
+
+def stop_runtime(repo: Path, *, close_cmux: bool = False, run_id: str | None = None) -> int:
+    """Stop a ccx run from the CLI.
+
+    Args:
+        repo: Target repository path.
+        close_cmux: Whether to close the cmux workspace.
+        run_id: Optional run identifier.
+    """
+    mark_runtime_stopped(repo, close_cmux=close_cmux, run_id=run_id, stopped_by="cli")
     print("stopped ccx run")
     return 0
+
+
+def signal_name(signum: int) -> str:
+    """Return a readable signal name.
+
+    Args:
+        signum: Numeric signal value.
+    """
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"signal-{signum}"
+
+
+def run_agent_wrapper(
+    *,
+    repo: Path,
+    run_id: str,
+    role: str,
+    prompt_path: Path,
+    child_command: list[str],
+    worker_id: str | None = None,
+) -> int:
+    """Run a Claude or Codex child process and stop ccx on interrupt.
+
+    Args:
+        repo: Target repository path.
+        run_id: Run identifier.
+        role: Agent role.
+        prompt_path: Prompt file appended as the final child argument.
+        child_command: Child command arguments.
+        worker_id: Optional worker identifier.
+    """
+    root = git_root(repo)
+    if not prompt_path.exists():
+        raise CliError(f"prompt file does not exist: {prompt_path}")
+    if not child_command:
+        raise CliError("agent child command is required")
+
+    prompt = prompt_path.read_text(encoding="utf-8")
+    command = [*child_command, prompt]
+    agent_label = f"{role}:{worker_id}" if worker_id else role
+    child: subprocess.Popen[Any] | None = None
+    stopped = False
+
+    def record_stop(reason: str) -> None:
+        nonlocal stopped
+        if stopped:
+            return
+        stopped = True
+        try:
+            mark_runtime_stopped(
+                root,
+                run_id=run_id,
+                stopped_by="signal",
+                stop_reason=reason,
+                stopped_agent=agent_label,
+            )
+            print(
+                f"\nccx: marked run {run_id} stopped after {reason} from {agent_label}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except CliError as exc:
+            print(f"\nccx: failed to mark run stopped: {exc}", file=sys.stderr, flush=True)
+
+    def handle_signal(signum: int, _frame: Any) -> None:
+        reason = signal_name(signum)
+        record_stop(reason)
+        if child and child.poll() is None:
+            with suppress(ProcessLookupError):
+                child.send_signal(signum)
+
+    previous_handlers = {
+        signal.SIGINT: signal.getsignal(signal.SIGINT),
+        signal.SIGTERM: signal.getsignal(signal.SIGTERM),
+    }
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+    try:
+        child = subprocess.Popen(command)
+        return_code = child.wait()
+    except FileNotFoundError as exc:
+        raise CliError(f"agent child command not found: {child_command[0]}") from exc
+    finally:
+        for signum, previous_handler in previous_handlers.items():
+            signal.signal(signum, previous_handler)
+
+    if return_code < 0:
+        reason = signal_name(-return_code)
+        if reason in {"SIGINT", "SIGTERM"}:
+            record_stop(reason)
+    return return_code
 
 
 def show_slash_menu() -> None:

@@ -22,6 +22,8 @@ ccx run "implement the requested feature"
 
 In run mode, Claude Opus plans the worker split, `ccx` creates run-scoped state under `.ccx/runs/<run-id>/` plus git worktrees, then cmux opens one Claude conductor pane and one Codex pane per worker. `.ccx/current-run` points to the most recent run, and runtime commands accept `--run <run-id>` for older concurrent runs.
 
+Each launched pane runs through `ccx agent`, which appends the generated prompt to the Claude/Codex command and records interrupts. Pressing `Ctrl-C` once in a conductor or worker pane interrupts the active child CLI and marks the run `stopped`; it does not close the cmux workspace unless the user separately runs `ccx stop --close-cmux`.
+
 ```bash
 ./scripts/claude-codex init /path/to/target-repo feature-name 3
 ./scripts/claude-codex status /path/to/target-repo

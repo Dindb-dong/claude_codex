@@ -106,6 +106,8 @@ ccx resume --run 20260415123456000000-feature
 ccx stop --run 20260415123456000000-feature
 ```
 
+Launched Claude and Codex panes run through a lightweight `ccx agent` wrapper. Pressing `Ctrl-C` once in a conductor or worker pane interrupts the active Claude/Codex child process and marks the current ccx run as `stopped`. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux workspace.
+
 Manual state commands:
 
 ```bash
@@ -146,7 +148,7 @@ export CCX_CODEX_EFFORT=medium
 - Workers must not edit files before the run approval barrier exists.
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - Same-file edits by multiple workers require explicit Claude arbitration.
-- `ccx stop` only marks state stopped by default. It closes cmux panes only with `--close-cmux`.
+- `Ctrl-C` in a launched pane and `ccx stop` mark state stopped by default. They close cmux panes only with `--close-cmux`.
 - Merge requires explicit human approval.
 
 ## Repository Layout
