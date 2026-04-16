@@ -101,6 +101,65 @@ class CliTestCase(unittest.TestCase):
         self.assertTrue(payload["approved"])
         self.assertEqual(payload["workers"][0]["id"], "worker-01")
 
+    def test_approve_uses_current_run_scoped_state(self) -> None:
+        """approve defaults to the .ccx current-run state directory."""
+        run_id = "20260416000000000000-demo"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (self.repo / ".ccx").mkdir()
+        (self.repo / ".ccx/current-run").write_text(run_id + "\n", encoding="utf-8")
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "validations").mkdir()
+        (run_root / "tasks/worker-01.md").write_text(
+            """# Worker Task
+
+## Worker
+
+- ID: worker-01
+- Branch: ccx/demo/worker-01
+- Worktree: /tmp/worker-01
+
+## Owned Scope
+
+- src/demo.py
+""",
+            encoding="utf-8",
+        )
+        (run_root / "validations/worker-01.md").write_text(
+            "# Worker Validation\n", encoding="utf-8"
+        )
+
+        exit_code = self.run_cli("approve", str(self.repo))
+
+        approval_file = run_root / "approvals/approved.json"
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(approval_file.exists())
+
+    def test_approve_accepts_explicit_run(self) -> None:
+        """approve can target a specific .ccx run."""
+        run_id = "20260416000000000000-explicit"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "validations").mkdir()
+        (run_root / "tasks/worker-01.md").write_text(
+            """# Worker Task
+
+## Worker
+
+- ID: worker-01
+- Branch: ccx/demo/worker-01
+- Worktree: /tmp/worker-01
+""",
+            encoding="utf-8",
+        )
+        (run_root / "validations/worker-01.md").write_text(
+            "# Worker Validation\n", encoding="utf-8"
+        )
+
+        exit_code = self.run_cli("approve", str(self.repo), "--run", run_id)
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((run_root / "approvals/approved.json").exists())
+
     def test_open_question_blocks_approval(self) -> None:
         """approve refuses to proceed when unresolved questions exist."""
         self.run_cli("init", str(self.repo), "demo", "1")
@@ -477,7 +536,10 @@ class CliTestCase(unittest.TestCase):
             skip_conductor=True,
         )
 
-        with patch("claude_codex.runner.run_command", side_effect=fake_run_command):
+        with (
+            patch("claude_codex.runner.run_command", side_effect=fake_run_command),
+            patch.dict(os.environ, {"CMUX_WORKSPACE_ID": "workspace:captured"}),
+        ):
             workspace = launch_cmux_workers_in_current_workspace(
                 config,
                 Plan(summary="Update UI", worker_count=1, tasks=[task]),
@@ -486,10 +548,33 @@ class CliTestCase(unittest.TestCase):
             )
 
         flattened = [" ".join(command[:2]) for command in calls]
-        self.assertEqual(workspace, "workspace:7")
+        self.assertEqual(workspace, "workspace:captured")
+        self.assertNotIn(["cmux", "current-workspace"], calls)
         self.assertNotIn("cmux new-workspace", flattened)
         self.assertIn("cmux new-pane", flattened)
         self.assertIn("cmux respawn-pane", flattened)
+        respawn_command = next(
+            command for command in calls if command[:2] == ["cmux", "respawn-pane"]
+        )
+        self.assertIn(f"--add-dir {self.repo / '.ccx/runs/run-1'}", " ".join(respawn_command))
+
+    def test_codex_child_command_adds_shared_state_writable_root(self) -> None:
+        """Codex workers receive the run state directory as an extra writable root."""
+        from claude_codex.runner import codex_child_command
+
+        run_root = self.repo / ".ccx/runs/run-1"
+
+        command = codex_child_command(
+            model="gpt-5.3-codex",
+            effort="medium",
+            worktree=self.repo / "worker-01",
+            writable_roots=[run_root],
+        )
+
+        self.assertIn("--sandbox", command)
+        self.assertIn("workspace-write", command)
+        self.assertIn("--add-dir", command)
+        self.assertEqual(command[command.index("--add-dir") + 1], str(run_root))
 
     def test_status_supports_target_repo(self) -> None:
         """status prints runtime state for a target repository."""

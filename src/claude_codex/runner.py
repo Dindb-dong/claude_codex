@@ -897,7 +897,7 @@ Plan summary:
 Hard workflow:
 1. Review worker validations in {paths.validations}.
 2. If questions appear in {paths.questions}, resolve them before approval.
-3. Only after consensus, run: ccx approve {config.repo}
+3. Only after consensus, run: ccx approve {config.repo} --run {run_id}
 4. Workers must not implement before {paths.approval_file} exists.
 5. Review handoffs in {paths.handoffs} as they arrive.
 6. Integrate worker branches into {integration_worktree}.
@@ -921,6 +921,18 @@ def worker_prompt(config: RunConfig, task: WorkerTask, paths: StatePaths, run_id
         paths: Shared state paths.
         run_id: Run identifier.
     """
+    validation_command = (
+        f"ccx validation {config.repo} {task.worker_id} --run {run_id} "
+        '--scope-coherence "..." --overlap-check "..." --recommendation approve'
+    )
+    question_command = (
+        f'ccx question {config.repo} {task.worker_id} --run {run_id} --title "..." --body "..."'
+    )
+    handoff_command = (
+        f"ccx handoff {config.repo} {task.worker_id} --run {run_id} "
+        f"--branch {task.branch} --worktree {task.worktree} "
+        '--summary "..."'
+    )
     return f"""You are {task.worker_id}, a Codex worker in a ccx Claude + Codex run.
 
 Target request:
@@ -934,13 +946,19 @@ Your task file:
 
 Hard rules:
 1. First validate your task boundary only. Do not edit code yet.
-2. Write validation to: {paths.validations / f"{task.worker_id}.md"}
-3. If anything is ambiguous, overlapping, or risky, write a question under: {paths.questions}
+2. Write validation with this shape:
+   {validation_command}
+3. If anything is ambiguous, overlapping, or risky, write a question with this shape:
+   {question_command}
 4. Do not implement until this approval barrier exists: {paths.approval_file}
 5. After approval, work only in this worktree: {task.worktree}
 6. If uncertainty appears during implementation, pause only yourself and write a question.
-7. On completion, write handoff to: {paths.handoffs / f"{task.worker_id}.md"}
+7. On completion, write handoff with this shape:
+   {handoff_command}
 8. Do not merge or push.
+9. The Codex session is launched with this shared state directory as an additional
+   writable root, so do not ask the user for approval just to write validation,
+   question, approval-check, or handoff files under: {paths.root}
 
 {interrupt_recovery_prompt(config, run_id)}
 
@@ -1099,23 +1117,31 @@ def claude_child_command(repo: Path, paths: StatePaths, *, model: str, effort: s
     ]
 
 
-def codex_child_command(*, model: str, effort: str, worktree: Path) -> list[str]:
+def codex_child_command(
+    *, model: str, effort: str, worktree: Path, writable_roots: list[Path] | None = None
+) -> list[str]:
     """Build the Codex worker child command.
 
     Args:
         model: Codex model.
         effort: Codex reasoning effort.
         worktree: Worker worktree.
+        writable_roots: Additional directories Codex may write without escalation.
     """
-    return [
+    command = [
         "codex",
         "--model",
         model,
+        "--sandbox",
+        "workspace-write",
         "-c",
         f'model_reasoning_effort="{effort}"',
         "--cd",
         str(worktree),
     ]
+    for root in writable_roots or []:
+        command.extend(["--add-dir", str(root)])
+    return command
 
 
 def launch_cmux_workers(
@@ -1143,6 +1169,7 @@ def launch_cmux_workers(
             model=config.codex_model,
             effort=config.codex_effort,
             worktree=first_task.worktree,
+            writable_roots=[run_state_root(config.repo, run_id)],
         ),
     )
     workspace_output = run_command(
@@ -1201,6 +1228,7 @@ def launch_cmux_workers(
                 model=config.codex_model,
                 effort=config.codex_effort,
                 worktree=task.worktree,
+                writable_roots=[run_state_root(config.repo, run_id)],
             ),
         )
         run_command(
@@ -1234,7 +1262,9 @@ def launch_cmux_workers_in_current_workspace(
         prompt_paths: Prompt files by role or worker ID.
         run_id: Run identifier.
     """
-    workspace = run_command(["cmux", "current-workspace"], cwd=config.repo, timeout=30)
+    workspace = os.environ.get("CMUX_WORKSPACE_ID") or run_command(
+        ["cmux", "current-workspace"], cwd=config.repo, timeout=30
+    )
     directions = ["right", "down", "right", "down", "right", "down"]
     for index, task in enumerate(plan.tasks):
         pane_output = run_command(
@@ -1273,6 +1303,7 @@ def launch_cmux_workers_in_current_workspace(
                 model=config.codex_model,
                 effort=config.codex_effort,
                 worktree=task.worktree,
+                writable_roots=[run_state_root(config.repo, run_id)],
             ),
         )
         run_command(
@@ -1564,6 +1595,7 @@ def launch_cmux_workers_from_state(repo: Path, state: dict[str, Any], paths: Sta
             model=str(models.get("codex") or "gpt-5.3-codex"),
             effort=str(models.get("codex_effort") or "medium"),
             worktree=first_worktree,
+            writable_roots=[paths.root],
         ),
     )
     workspace_output = run_command(
@@ -1627,6 +1659,7 @@ def launch_cmux_workers_from_state(repo: Path, state: dict[str, Any], paths: Sta
                 model=str(models.get("codex") or "gpt-5.3-codex"),
                 effort=str(models.get("codex_effort") or "medium"),
                 worktree=worktree,
+                writable_roots=[paths.root],
             ),
         )
         run_command(
