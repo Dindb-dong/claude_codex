@@ -416,6 +416,123 @@ def build_status(paths: StatePaths) -> dict[str, Any]:
     }
 
 
+def runtime_state_path(paths: StatePaths) -> Path:
+    """Return the run-state path for a ccx run.
+
+    Args:
+        paths: Resolved orchestration paths.
+    """
+    return paths.root / "run-state.json"
+
+
+def read_runtime_state(paths: StatePaths) -> dict[str, Any]:
+    """Read run-state.json when present.
+
+    Args:
+        paths: Resolved orchestration paths.
+    """
+    path = runtime_state_path(paths)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_runtime_state(paths: StatePaths, state: dict[str, Any]) -> None:
+    """Write run-state.json.
+
+    Args:
+        paths: Resolved orchestration paths.
+        state: Runtime state payload.
+    """
+    write_text(
+        runtime_state_path(paths), json.dumps(state, indent=2, sort_keys=True) + "\n", force=True
+    )
+
+
+def command_run_id(repo: Path, explicit_run: str | None, paths: StatePaths) -> str:
+    """Resolve the run id used by a state command.
+
+    Args:
+        repo: Target repository path.
+        explicit_run: Optional CLI run id.
+        paths: Resolved orchestration paths.
+    """
+    if explicit_run:
+        return explicit_run
+    current_run = read_current_run(repo)
+    if current_run:
+        return current_run
+    if paths.root.parent.name == RUNS_DIR_NAME:
+        return paths.root.name
+    return ""
+
+
+def approval_resume_prompt(repo: Path, run_id: str, worker_id: str) -> str:
+    """Build the prompt sent to workers after approval.
+
+    Args:
+        repo: Target repository path.
+        run_id: Run identifier.
+        worker_id: Worker identifier.
+    """
+    return (
+        f"ccx approval received for {run_id}. You are {worker_id}. "
+        f"Run `ccx check-barrier {repo} --run {run_id}`, then continue implementation "
+        "in your assigned worktree only. When complete, write your handoff with "
+        f"`ccx handoff {repo} {worker_id} --run {run_id} ...`. If blocked, write a "
+        "ccx question and pause."
+    )
+
+
+def notify_workers_of_approval(repo: Path, paths: StatePaths, run_id: str) -> int:
+    """Send an approval resume prompt to recorded cmux worker surfaces.
+
+    Args:
+        repo: Target repository path.
+        paths: Resolved orchestration paths.
+        run_id: Run identifier.
+    """
+    state = read_runtime_state(paths)
+    workspace = str(state.get("cmux_workspace") or "")
+    workers = [worker for worker in state.get("workers", []) if isinstance(worker, dict)]
+    if not workspace or not workers:
+        return 0
+
+    notified = 0
+    for worker in workers:
+        worker_id = str(worker.get("id") or "")
+        surface = str(worker.get("surface") or "")
+        if not worker_id or not surface:
+            continue
+        message = approval_resume_prompt(repo, run_id, worker_id)
+        try:
+            subprocess.run(
+                ["cmux", "send", "--workspace", workspace, "--surface", surface, message],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["cmux", "send-key", "--workspace", workspace, "--surface", surface, "enter"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            print(f"warning: failed to notify {worker_id} after approval: {exc}", file=sys.stderr)
+            continue
+        notified += 1
+
+    if notified:
+        state["approval_notified_at"] = datetime.now(UTC).isoformat()
+        state["approval_notified_workers"] = notified
+        write_runtime_state(paths, state)
+        print(f"notified workers after approval: {notified}")
+    return notified
+
+
 def command_status(args: argparse.Namespace) -> int:
     """Print orchestration status.
 
@@ -586,6 +703,8 @@ def command_approve(args: argparse.Namespace) -> int:
     approval_content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     write_text(paths.approval_file, approval_content, force=args.force)
     print(f"wrote approval barrier: {paths.approval_file}")
+    if not args.no_notify_workers:
+        notify_workers_of_approval(repo, paths, command_run_id(repo, args.run, paths))
     return 0
 
 
@@ -868,6 +987,11 @@ def build_parser() -> argparse.ArgumentParser:
     approve_parser.add_argument("target_repo")
     approve_parser.add_argument("--run", help="select a specific run id")
     approve_parser.add_argument("--conductor", default="claude")
+    approve_parser.add_argument(
+        "--no-notify-workers",
+        action="store_true",
+        help="only write approved.json; do not send cmux resume prompts to workers",
+    )
     approve_parser.add_argument(
         "--force",
         action="store_true",

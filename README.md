@@ -101,11 +101,12 @@ ccx run --no-conductor "implement the requested feature"
 3. Codex workers validate scope first and do not edit code before approval.
 4. If a task is unclear, overlapping, or risky, the worker writes a question and stops.
 5. Claude resolves questions and writes the approval barrier.
-6. Workers implement independently after approval.
-7. Workers stop only themselves when new uncertainty appears.
-8. Workers write handoff documents when done.
-9. Claude reviews handoffs, integrates branches, resolves conflicts, and runs checks.
-10. Claude splits commits, pushes, opens a PR, and waits for explicit human approval before merge.
+6. `ccx approve` records approval and sends a resume prompt to recorded worker panes.
+7. Workers also poll the approval barrier after validation, then implement independently.
+8. Workers stop only themselves when new uncertainty appears.
+9. Workers write handoff documents when done.
+10. Claude reviews handoffs, integrates branches, resolves conflicts, and runs checks.
+11. Claude splits commits, pushes, opens a PR, and waits for explicit human approval before merge.
 
 ## Runtime Commands
 
@@ -127,6 +128,11 @@ ccx stop --run 20260415123456000000-feature
 
 Codex workers run through a lightweight `ccx agent` wrapper. The Claude conductor is launched as a foreground CLI in the original `ccx` terminal so the user can approve, arbitrate, and review from Claude directly. Pressing `Ctrl-C` interrupts the active Claude/Codex child process and marks the current ccx run as `stopped` when the child exits with a signal status. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux worker workspace.
 
+Worker Codex panes are launched with `workspace-write`, the worker worktree as `--cd`,
+the shared run state as `--add-dir`, and `--ask-for-approval never`. This keeps
+validation/question/handoff writes non-interactive while the sandbox still blocks writes
+outside the worktree and shared run state.
+
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated conductor and worker prompts include an interrupt recovery rule: before resuming after an explicit user interrupt, the agent checks `ccx status --run <run-id> --json`; if the run is still stale `running`, it first runs `ccx stop --run <run-id>`.
 
 Manual state commands use `.ccx/current-run` by default. Add `--run <run-id>` when
@@ -142,6 +148,7 @@ ccx validation <target-repo> <worker-id> \
 ccx question <target-repo> <worker-id> --run <run-id> --title "Question" --body "Details"
 ccx resolve-question <target-repo> <question-name> --run <run-id> --answer "Decision"
 ccx approve <target-repo> --run <run-id>
+ccx approve <target-repo> --run <run-id> --no-notify-workers
 ccx check-barrier <target-repo> --run <run-id>
 ccx handoff <target-repo> <worker-id> \
   --run <run-id> \
@@ -171,6 +178,7 @@ export CCX_CODEX_EFFORT=medium
 
 - Workers must not edit files before the run approval barrier exists.
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
+- `ccx approve` should notify recorded worker panes; workers also wait on `ccx check-barrier`.
 - Same-file edits by multiple workers require explicit Claude arbitration.
 - `Ctrl-C` in a launched pane and `ccx stop` mark state stopped by default. They close cmux panes only with `--close-cmux`.
 - `Esc` is recovered by prompt protocol on resume: agents only stop stale `running` state when recovering from an explicit user interrupt.
