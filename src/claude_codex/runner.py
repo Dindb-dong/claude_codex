@@ -1220,6 +1220,78 @@ def launch_cmux_workers(
     return workspace
 
 
+def launch_cmux_workers_in_current_workspace(
+    config: RunConfig,
+    plan: Plan,
+    prompt_paths: dict[str, Path],
+    run_id: str,
+) -> str:
+    """Launch Codex worker panes into the currently selected cmux workspace.
+
+    Args:
+        config: Runner configuration.
+        plan: Normalized run plan.
+        prompt_paths: Prompt files by role or worker ID.
+        run_id: Run identifier.
+    """
+    workspace = run_command(["cmux", "current-workspace"], cwd=config.repo, timeout=30)
+    directions = ["right", "down", "right", "down", "right", "down"]
+    for index, task in enumerate(plan.tasks):
+        pane_output = run_command(
+            [
+                "cmux",
+                "new-pane",
+                "--workspace",
+                workspace,
+                "--direction",
+                directions[index % len(directions)],
+            ],
+            cwd=config.repo,
+            timeout=30,
+        )
+        pane = parse_ref_or_none(pane_output, "pane")
+        if not pane:
+            panes_output = run_command(
+                ["cmux", "list-panes", "--workspace", workspace],
+                cwd=config.repo,
+                timeout=30,
+            )
+            pane = focused_pane_ref(panes_output)
+        surface_output = run_command(
+            ["cmux", "list-pane-surfaces", "--workspace", workspace, "--pane", pane],
+            cwd=config.repo,
+            timeout=30,
+        )
+        surface = first_surface_ref(surface_output)
+        codex_command = agent_command_with_prompt(
+            repo=config.repo,
+            run_id=run_id,
+            role="worker",
+            worker_id=task.worker_id,
+            prompt_path=prompt_paths[task.worker_id],
+            child_command=codex_child_command(
+                model=config.codex_model,
+                effort=config.codex_effort,
+                worktree=task.worktree,
+            ),
+        )
+        run_command(
+            [
+                "cmux",
+                "respawn-pane",
+                "--workspace",
+                workspace,
+                "--surface",
+                surface,
+                "--command",
+                codex_command,
+            ],
+            cwd=config.repo,
+            timeout=30,
+        )
+    return workspace
+
+
 def run_conductor_foreground(
     config: RunConfig,
     paths: StatePaths,
@@ -1913,8 +1985,12 @@ def run_orchestration(config: RunConfig) -> int:
         print("ccx: skipped cmux launch")
         return 0
 
-    print("ccx: launching Codex worker panes in cmux...")
-    workspace = launch_cmux_workers(config, plan, prompt_paths, run_id)
+    if config.skip_conductor:
+        print("ccx: launching Codex worker panes in the current cmux workspace...")
+        workspace = launch_cmux_workers_in_current_workspace(config, plan, prompt_paths, run_id)
+    else:
+        print("ccx: launching Codex worker panes in cmux...")
+        workspace = launch_cmux_workers(config, plan, prompt_paths, run_id)
     state["status"] = "running"
     state["cmux_workspace"] = workspace
     state["launched_at"] = datetime.now(UTC).isoformat()

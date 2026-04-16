@@ -400,7 +400,11 @@ class CliTestCase(unittest.TestCase):
                 "claude_codex.runner.check_claude_auth", return_value=authenticated_claude_check()
             ),
             patch("claude_codex.runner.request_plan", return_value=plan),
-            patch("claude_codex.runner.launch_cmux_workers", return_value="workspace:1"),
+            patch(
+                "claude_codex.runner.launch_cmux_workers_in_current_workspace",
+                return_value="workspace:1",
+            ),
+            patch("claude_codex.runner.launch_cmux_workers") as new_workspace_launcher,
             patch("claude_codex.runner.run_conductor_foreground") as conductor,
         ):
             exit_code = self.run_cli(
@@ -421,6 +425,71 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(run_state["status"], "running")
         self.assertEqual(run_state["cmux_workspace"], "workspace:1")
         self.assertFalse(conductor.called)
+        self.assertFalse(new_workspace_launcher.called)
+
+    def test_current_workspace_worker_launcher_does_not_create_workspace(self) -> None:
+        """Claude-first worker launch adds panes to the current cmux workspace."""
+        from claude_codex.runner import (
+            Plan,
+            RunConfig,
+            WorkerTask,
+            launch_cmux_workers_in_current_workspace,
+        )
+
+        calls: list[list[str]] = []
+
+        def fake_run_command(command: list[str], **_: object) -> str:
+            calls.append(command)
+            if command == ["cmux", "current-workspace"]:
+                return "workspace:7"
+            if command[:2] == ["cmux", "new-pane"]:
+                return f"pane:{len([call for call in calls if call[:2] == ['cmux', 'new-pane']])}"
+            if command[:2] == ["cmux", "list-pane-surfaces"]:
+                return "surface:9"
+            if command[:2] == ["cmux", "respawn-pane"]:
+                return ""
+            raise AssertionError(f"unexpected command: {command}")
+
+        task = WorkerTask(
+            worker_id="worker-01",
+            title="UI update",
+            objective="Implement it.",
+            owned_scope=["src/ui"],
+            non_goals=[],
+            required_tests=[],
+            risks=[],
+            branch="ccx/run/worker-01",
+            worktree=self.repo / "worker-01",
+        )
+        prompt_path = self.repo / "worker-01.md"
+        prompt_path.write_text("worker prompt\n", encoding="utf-8")
+        config = RunConfig(
+            repo=self.repo,
+            request="make the UI cleaner",
+            claude_model="opus",
+            claude_effort="medium",
+            codex_model="gpt-5.3-codex",
+            codex_effort="medium",
+            requested_workers=1,
+            dry_run=False,
+            skip_launch=False,
+            force_state=False,
+            skip_conductor=True,
+        )
+
+        with patch("claude_codex.runner.run_command", side_effect=fake_run_command):
+            workspace = launch_cmux_workers_in_current_workspace(
+                config,
+                Plan(summary="Update UI", worker_count=1, tasks=[task]),
+                {"worker-01": prompt_path},
+                "run-1",
+            )
+
+        flattened = [" ".join(command[:2]) for command in calls]
+        self.assertEqual(workspace, "workspace:7")
+        self.assertNotIn("cmux new-workspace", flattened)
+        self.assertIn("cmux new-pane", flattened)
+        self.assertIn("cmux respawn-pane", flattened)
 
     def test_status_supports_target_repo(self) -> None:
         """status prints runtime state for a target repository."""
