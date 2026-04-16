@@ -160,6 +160,58 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue((run_root / "approvals/approved.json").exists())
 
+    def test_approve_notifies_recorded_worker_surfaces(self) -> None:
+        """approve sends a resume prompt to recorded cmux worker surfaces."""
+        run_id = "20260416000000000000-notify"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "validations").mkdir()
+        (run_root / "tasks/worker-01.md").write_text(
+            """# Worker Task
+
+## Worker
+
+- ID: worker-01
+- Branch: ccx/demo/worker-01
+- Worktree: /tmp/worker-01
+""",
+            encoding="utf-8",
+        )
+        (run_root / "validations/worker-01.md").write_text(
+            "# Worker Validation\n", encoding="utf-8"
+        )
+        (run_root / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "cmux_workspace": "workspace:1",
+                    "workers": [
+                        {
+                            "id": "worker-01",
+                            "surface": "surface:9",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("claude_codex.cli.subprocess.run", side_effect=fake_run):
+            exit_code = self.run_cli("approve", str(self.repo), "--run", run_id)
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(any(command[:2] == ["cmux", "send"] for command in calls))
+        self.assertTrue(any(command[:2] == ["cmux", "send-key"] for command in calls))
+        send_command = next(command for command in calls if command[:2] == ["cmux", "send"])
+        self.assertIn("workspace:1", send_command)
+        self.assertIn("surface:9", send_command)
+        self.assertIn("ccx approval received", " ".join(send_command))
+
     def test_open_question_blocks_approval(self) -> None:
         """approve refuses to proceed when unresolved questions exist."""
         self.run_cli("init", str(self.repo), "demo", "1")
@@ -436,9 +488,12 @@ class CliTestCase(unittest.TestCase):
         self.assertIn("Esc may interrupt Claude/Codex without notifying ccx", conductor_prompt)
         self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
         self.assertIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
+        self.assertIn(f"until ccx check-barrier {resolved_repo} --run {current_run}", worker_prompt)
 
     def test_run_no_conductor_launches_workers_without_nested_claude(self) -> None:
         """run --no-conductor launches workers and leaves current Claude as conductor."""
+        from claude_codex.runner import WorkerLaunch, WorkerPane
+
         plan = {
             "summary": "Update UI",
             "worker_count": 1,
@@ -461,7 +516,16 @@ class CliTestCase(unittest.TestCase):
             patch("claude_codex.runner.request_plan", return_value=plan),
             patch(
                 "claude_codex.runner.launch_cmux_workers_in_current_workspace",
-                return_value="workspace:1",
+                return_value=WorkerLaunch(
+                    workspace="workspace:1",
+                    panes=[
+                        WorkerPane(
+                            worker_id="worker-01",
+                            pane="pane:1",
+                            surface="surface:1",
+                        )
+                    ],
+                ),
             ),
             patch("claude_codex.runner.launch_cmux_workers") as new_workspace_launcher,
             patch("claude_codex.runner.run_conductor_foreground") as conductor,
@@ -483,6 +547,7 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(run_state["status"], "running")
         self.assertEqual(run_state["cmux_workspace"], "workspace:1")
+        self.assertEqual(run_state["workers"][0]["surface"], "surface:1")
         self.assertFalse(conductor.called)
         self.assertFalse(new_workspace_launcher.called)
 
@@ -540,7 +605,7 @@ class CliTestCase(unittest.TestCase):
             patch("claude_codex.runner.run_command", side_effect=fake_run_command),
             patch.dict(os.environ, {"CMUX_WORKSPACE_ID": "workspace:captured"}),
         ):
-            workspace = launch_cmux_workers_in_current_workspace(
+            launch = launch_cmux_workers_in_current_workspace(
                 config,
                 Plan(summary="Update UI", worker_count=1, tasks=[task]),
                 {"worker-01": prompt_path},
@@ -548,7 +613,8 @@ class CliTestCase(unittest.TestCase):
             )
 
         flattened = [" ".join(command[:2]) for command in calls]
-        self.assertEqual(workspace, "workspace:captured")
+        self.assertEqual(launch.workspace, "workspace:captured")
+        self.assertEqual(launch.panes[0].surface, "surface:9")
         self.assertNotIn(["cmux", "current-workspace"], calls)
         self.assertNotIn("cmux new-workspace", flattened)
         self.assertIn("cmux new-pane", flattened)
@@ -573,6 +639,8 @@ class CliTestCase(unittest.TestCase):
 
         self.assertIn("--sandbox", command)
         self.assertIn("workspace-write", command)
+        self.assertIn("--ask-for-approval", command)
+        self.assertIn("never", command)
         self.assertIn("--add-dir", command)
         self.assertEqual(command[command.index("--add-dir") + 1], str(run_root))
 

@@ -121,6 +121,34 @@ class RunConfig:
 
 
 @dataclass(frozen=True)
+class WorkerPane:
+    """cmux pane metadata for a launched worker.
+
+    Args:
+        worker_id: Stable worker identifier.
+        pane: cmux pane ref.
+        surface: cmux terminal surface ref.
+    """
+
+    worker_id: str
+    pane: str
+    surface: str
+
+
+@dataclass(frozen=True)
+class WorkerLaunch:
+    """cmux launch metadata for a worker set.
+
+    Args:
+        workspace: cmux workspace ref.
+        panes: Worker pane metadata.
+    """
+
+    workspace: str
+    panes: list[WorkerPane]
+
+
+@dataclass(frozen=True)
 class SlashCommand:
     """Slash command shown in the interactive picker.
 
@@ -876,6 +904,8 @@ def conductor_prompt(
         integration_worktree: Integration worktree path.
         run_id: Run identifier.
     """
+    watch_command = f"ccx watch {config.repo} --run {run_id} --once"
+    status_command = f"ccx status {config.repo} --run {run_id}"
     return f"""You are the Claude conductor for this ccx run.
 
 Model role:
@@ -899,12 +929,18 @@ Hard workflow:
 2. If questions appear in {paths.questions}, resolve them before approval.
 3. Only after consensus, run: ccx approve {config.repo} --run {run_id}
 4. Workers must not implement before {paths.approval_file} exists.
-5. Review handoffs in {paths.handoffs} as they arrive.
-6. Integrate worker branches into {integration_worktree}.
-7. Resolve conflicts or reassign focused fixes.
-8. Run formatting, linting, and tests.
-9. Split coherent commits and push a branch/PR.
-10. Do not merge without explicit human approval.
+5. `ccx approve` resumes recorded worker panes automatically. Do not assume workers
+   will wake up from file creation alone.
+6. Review handoffs in {paths.handoffs} as they arrive. Prefer `{watch_command}`
+   or `{status_command}` over long background sleep polling.
+7. If you inspect cmux worker output, use `cmux read-screen --workspace <workspace>
+   --surface <surface> --scrollback --lines 80`.
+   Do not use `cmux read-pane`; that is not a cmux command.
+8. Integrate worker branches into {integration_worktree}.
+9. Resolve conflicts or reassign focused fixes.
+10. Run formatting, linting, and tests.
+11. Split coherent commits and push a branch/PR.
+12. Do not merge without explicit human approval.
 
 {interrupt_recovery_prompt(config, run_id)}
 
@@ -925,6 +961,7 @@ def worker_prompt(config: RunConfig, task: WorkerTask, paths: StatePaths, run_id
         f"ccx validation {config.repo} {task.worker_id} --run {run_id} "
         '--scope-coherence "..." --overlap-check "..." --recommendation approve'
     )
+    barrier_wait_command = f"until ccx check-barrier {config.repo} --run {run_id}; do sleep 5; done"
     question_command = (
         f'ccx question {config.repo} {task.worker_id} --run {run_id} --title "..." --body "..."'
     )
@@ -950,15 +987,20 @@ Hard rules:
    {validation_command}
 3. If anything is ambiguous, overlapping, or risky, write a question with this shape:
    {question_command}
-4. Do not implement until this approval barrier exists: {paths.approval_file}
-5. After approval, work only in this worktree: {task.worktree}
-6. If uncertainty appears during implementation, pause only yourself and write a question.
-7. On completion, write handoff with this shape:
+4. If validation has no blocking question, wait for approval with:
+   {barrier_wait_command}
+5. Do not implement until this approval barrier exists: {paths.approval_file}
+6. After approval, work only in this worktree: {task.worktree}
+7. If uncertainty appears during implementation, pause only yourself and write a question.
+8. On completion, write handoff with this shape:
    {handoff_command}
-8. Do not merge or push.
-9. The Codex session is launched with this shared state directory as an additional
+9. Do not merge or push.
+10. The Codex session is launched with this shared state directory as an additional
    writable root, so do not ask the user for approval just to write validation,
    question, approval-check, or handoff files under: {paths.root}
+11. Your Codex approval policy is non-interactive. Do not ask the user to approve
+    ccx validation/question/handoff writes; if a sandboxed command fails, report the
+    exact failure to the conductor and stop.
 
 {interrupt_recovery_prompt(config, run_id)}
 
@@ -1134,6 +1176,8 @@ def codex_child_command(
         model,
         "--sandbox",
         "workspace-write",
+        "--ask-for-approval",
+        "never",
         "-c",
         f'model_reasoning_effort="{effort}"',
         "--cd",
@@ -1149,7 +1193,7 @@ def launch_cmux_workers(
     plan: Plan,
     prompt_paths: dict[str, Path],
     run_id: str,
-) -> str:
+) -> WorkerLaunch:
     """Launch Codex worker panes in cmux.
 
     Args:
@@ -1189,6 +1233,24 @@ def launch_cmux_workers(
     workspace = parse_ref_or_none(workspace_output, "workspace")
     if not workspace:
         workspace = run_command(["cmux", "current-workspace"], cwd=config.repo, timeout=30)
+    first_panes_output = run_command(
+        ["cmux", "list-panes", "--workspace", workspace],
+        cwd=config.repo,
+        timeout=30,
+    )
+    first_pane = focused_pane_ref(first_panes_output)
+    first_surface_output = run_command(
+        ["cmux", "list-pane-surfaces", "--workspace", workspace, "--pane", first_pane],
+        cwd=config.repo,
+        timeout=30,
+    )
+    launched = [
+        WorkerPane(
+            worker_id=first_task.worker_id,
+            pane=first_pane,
+            surface=first_surface_ref(first_surface_output),
+        )
+    ]
 
     directions = ["right", "down", "right", "down", "right", "down"]
     for index, task in enumerate(plan.tasks[1:]):
@@ -1245,7 +1307,8 @@ def launch_cmux_workers(
             cwd=config.repo,
             timeout=30,
         )
-    return workspace
+        launched.append(WorkerPane(worker_id=task.worker_id, pane=pane, surface=surface))
+    return WorkerLaunch(workspace=workspace, panes=launched)
 
 
 def launch_cmux_workers_in_current_workspace(
@@ -1253,7 +1316,7 @@ def launch_cmux_workers_in_current_workspace(
     plan: Plan,
     prompt_paths: dict[str, Path],
     run_id: str,
-) -> str:
+) -> WorkerLaunch:
     """Launch Codex worker panes into the currently selected cmux workspace.
 
     Args:
@@ -1265,6 +1328,7 @@ def launch_cmux_workers_in_current_workspace(
     workspace = os.environ.get("CMUX_WORKSPACE_ID") or run_command(
         ["cmux", "current-workspace"], cwd=config.repo, timeout=30
     )
+    launched: list[WorkerPane] = []
     directions = ["right", "down", "right", "down", "right", "down"]
     for index, task in enumerate(plan.tasks):
         pane_output = run_command(
@@ -1320,7 +1384,8 @@ def launch_cmux_workers_in_current_workspace(
             cwd=config.repo,
             timeout=30,
         )
-    return workspace
+        launched.append(WorkerPane(worker_id=task.worker_id, pane=pane, surface=surface))
+    return WorkerLaunch(workspace=workspace, panes=launched)
 
 
 def run_conductor_foreground(
@@ -1534,6 +1599,24 @@ def print_runtime_status(repo: Path, *, as_json: bool = False, run_id: str | Non
     return 0
 
 
+def apply_worker_launch_metadata(state: dict[str, Any], launch: WorkerLaunch) -> None:
+    """Store worker pane metadata in runtime state.
+
+    Args:
+        state: Mutable runtime state payload.
+        launch: cmux worker launch metadata.
+    """
+    panes = {pane.worker_id: pane for pane in launch.panes}
+    for worker in state.get("workers", []):
+        if not isinstance(worker, dict):
+            continue
+        pane = panes.get(str(worker.get("id")))
+        if pane is None:
+            continue
+        worker["pane"] = pane.pane
+        worker["surface"] = pane.surface
+
+
 def watch_runtime(
     repo: Path,
     *,
@@ -1561,7 +1644,9 @@ def watch_runtime(
         time.sleep(interval)
 
 
-def launch_cmux_workers_from_state(repo: Path, state: dict[str, Any], paths: StatePaths) -> str:
+def launch_cmux_workers_from_state(
+    repo: Path, state: dict[str, Any], paths: StatePaths
+) -> WorkerLaunch:
     """Relaunch Codex worker panes from persisted state.
 
     Args:
@@ -1615,6 +1700,24 @@ def launch_cmux_workers_from_state(repo: Path, state: dict[str, Any], paths: Sta
     workspace = parse_ref_or_none(workspace_output, "workspace")
     if not workspace:
         workspace = run_command(["cmux", "current-workspace"], cwd=repo, timeout=30)
+    first_panes_output = run_command(
+        ["cmux", "list-panes", "--workspace", workspace],
+        cwd=repo,
+        timeout=30,
+    )
+    first_pane = focused_pane_ref(first_panes_output)
+    first_surface_output = run_command(
+        ["cmux", "list-pane-surfaces", "--workspace", workspace, "--pane", first_pane],
+        cwd=repo,
+        timeout=30,
+    )
+    launched = [
+        WorkerPane(
+            worker_id=first_worker_id,
+            pane=first_pane,
+            surface=first_surface_ref(first_surface_output),
+        )
+    ]
 
     directions = ["right", "down", "right", "down", "right", "down"]
     for index, worker in enumerate(workers[1:]):
@@ -1676,7 +1779,8 @@ def launch_cmux_workers_from_state(repo: Path, state: dict[str, Any], paths: Sta
             cwd=repo,
             timeout=30,
         )
-    return workspace
+        launched.append(WorkerPane(worker_id=worker_id, pane=pane, surface=surface))
+    return WorkerLaunch(workspace=workspace, panes=launched)
 
 
 def resume_runtime(repo: Path, run_id: str | None = None) -> int:
@@ -1691,13 +1795,14 @@ def resume_runtime(repo: Path, run_id: str | None = None) -> int:
     state = read_runtime_state(root, run_id)
     if not state:
         raise CliError("no ccx runtime state found")
-    workspace = launch_cmux_workers_from_state(root, state, paths)
+    launch = launch_cmux_workers_from_state(root, state, paths)
     state["status"] = "running"
-    state["cmux_workspace"] = workspace
+    state["cmux_workspace"] = launch.workspace
+    apply_worker_launch_metadata(state, launch)
     state["resumed_at"] = datetime.now(UTC).isoformat()
     write_current_run(root, state["run_id"])
     write_runtime_state(root, state, state["run_id"])
-    print(f"resumed ccx worker workspace: {workspace}")
+    print(f"resumed ccx worker workspace: {launch.workspace}")
 
     prompt_path = paths.root / "prompts" / "claude-conductor.md"
     if not prompt_path.exists():
@@ -2020,15 +2125,16 @@ def run_orchestration(config: RunConfig) -> int:
 
     if config.skip_conductor:
         print("ccx: launching Codex worker panes in the current cmux workspace...")
-        workspace = launch_cmux_workers_in_current_workspace(config, plan, prompt_paths, run_id)
+        launch = launch_cmux_workers_in_current_workspace(config, plan, prompt_paths, run_id)
     else:
         print("ccx: launching Codex worker panes in cmux...")
-        workspace = launch_cmux_workers(config, plan, prompt_paths, run_id)
+        launch = launch_cmux_workers(config, plan, prompt_paths, run_id)
     state["status"] = "running"
-    state["cmux_workspace"] = workspace
+    state["cmux_workspace"] = launch.workspace
+    apply_worker_launch_metadata(state, launch)
     state["launched_at"] = datetime.now(UTC).isoformat()
     write_runtime_state(config.repo, state, run_id)
-    print(f"ccx: launched cmux worker workspace {workspace}")
+    print(f"ccx: launched cmux worker workspace {launch.workspace}")
     if config.skip_conductor:
         print("ccx: skipped conductor launch; current Claude session should act as conductor.")
         print(f"ccx: conductor prompt is at {prompt_paths['conductor']}")
