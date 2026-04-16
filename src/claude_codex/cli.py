@@ -718,6 +718,7 @@ def command_run(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         skip_launch=args.skip_launch,
         force_state=args.force_state,
+        skip_conductor=args.no_conductor,
     )
     return run_orchestration(config)
 
@@ -737,6 +738,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--workers", type=positive_int)
     run_parser.add_argument("--dry-run", action="store_true", help="print Claude plan only")
     run_parser.add_argument("--skip-launch", action="store_true", help="skip cmux launch")
+    run_parser.add_argument(
+        "--no-conductor",
+        action="store_true",
+        help="launch worker panes only; use the current Claude session as conductor",
+    )
     run_parser.add_argument(
         "--force-state",
         action="store_true",

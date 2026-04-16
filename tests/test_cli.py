@@ -378,6 +378,50 @@ class CliTestCase(unittest.TestCase):
         self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
         self.assertIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
 
+    def test_run_no_conductor_launches_workers_without_nested_claude(self) -> None:
+        """run --no-conductor launches workers and leaves current Claude as conductor."""
+        plan = {
+            "summary": "Update UI",
+            "worker_count": 1,
+            "tasks": [
+                {
+                    "title": "UI update",
+                    "objective": "Implement the requested UI update.",
+                    "owned_scope": ["src/ui"],
+                    "non_goals": ["backend changes"],
+                    "required_tests": ["npm test"],
+                    "risks": ["visual regression"],
+                }
+            ],
+        }
+
+        with (
+            patch(
+                "claude_codex.runner.check_claude_auth", return_value=authenticated_claude_check()
+            ),
+            patch("claude_codex.runner.request_plan", return_value=plan),
+            patch("claude_codex.runner.launch_cmux_workers", return_value="workspace:1"),
+            patch("claude_codex.runner.run_conductor_foreground") as conductor,
+        ):
+            exit_code = self.run_cli(
+                "run",
+                "--repo",
+                str(self.repo),
+                "--no-conductor",
+                "--workers",
+                "1",
+                "make the UI cleaner",
+            )
+
+        current_run = (self.repo / ".ccx/current-run").read_text(encoding="utf-8").strip()
+        run_state = json.loads(
+            (self.repo / ".ccx/runs" / current_run / "run-state.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_state["status"], "running")
+        self.assertEqual(run_state["cmux_workspace"], "workspace:1")
+        self.assertFalse(conductor.called)
+
     def test_status_supports_target_repo(self) -> None:
         """status prints runtime state for a target repository."""
         exit_code = self.run_cli("status", str(self.repo))
@@ -499,8 +543,11 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         command_file = fake_home / ".claude/commands/ccx-status.md"
+        run_command_file = fake_home / ".claude/commands/ccx-run.md"
         self.assertTrue(command_file.exists())
+        self.assertTrue(run_command_file.exists())
         self.assertIn("status(ccx)", command_file.read_text(encoding="utf-8"))
+        self.assertIn("ccx run --no-conductor", run_command_file.read_text(encoding="utf-8"))
 
     def test_doctor_runs(self) -> None:
         """doctor returns a process status after checking external commands."""

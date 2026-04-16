@@ -53,6 +53,7 @@ It also installs Claude Code user slash commands into `~/.claude/commands/`:
 
 ```text
 /ccx-status   status(ccx): show orchestration state
+/ccx-run      run(ccx): start worker orchestration from current Claude
 /ccx-watch    watch(ccx): watch progress
 /ccx-resume   resume(ccx): relaunch conductor/workers
 /ccx-stop     stop(ccx): mark run stopped
@@ -62,7 +63,18 @@ Claude native slash commands remain available. The ccx commands are namespaced t
 
 ## Quick Start
 
-Run `ccx` inside the repository you want to work on:
+Recommended Claude-first flow:
+
+```bash
+cd /path/to/your-repo
+claude
+```
+
+Then run `/ccx-run <task request>` inside Claude. ccx creates run state,
+worktrees, and Codex worker panes, while the already-open Claude session remains
+the conductor.
+
+Standalone flow:
 
 ```bash
 cd /path/to/your-repo
@@ -79,6 +91,7 @@ One-shot form:
 
 ```bash
 ccx run "implement the requested feature"
+ccx run --no-conductor "implement the requested feature"
 ```
 
 ## Core Protocol

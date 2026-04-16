@@ -104,6 +104,7 @@ class RunConfig:
         dry_run: Whether to avoid worktree and cmux side effects.
         skip_launch: Whether to prepare files but skip cmux launch.
         force_state: Whether to overwrite existing orchestration state.
+        skip_conductor: Whether an already-running Claude session will act as conductor.
     """
 
     repo: Path
@@ -116,6 +117,7 @@ class RunConfig:
     dry_run: bool
     skip_launch: bool
     force_state: bool
+    skip_conductor: bool = False
 
 
 @dataclass(frozen=True)
@@ -1853,6 +1855,7 @@ def run_orchestration(config: RunConfig) -> int:
         dry_run=config.dry_run,
         skip_launch=config.skip_launch,
         force_state=config.force_state,
+        skip_conductor=config.skip_conductor,
     )
     timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
     run_id = f"{timestamp}-{slugify(config.request)}"
@@ -1917,6 +1920,10 @@ def run_orchestration(config: RunConfig) -> int:
     state["launched_at"] = datetime.now(UTC).isoformat()
     write_runtime_state(config.repo, state, run_id)
     print(f"ccx: launched cmux worker workspace {workspace}")
+    if config.skip_conductor:
+        print("ccx: skipped conductor launch; current Claude session should act as conductor.")
+        print(f"ccx: conductor prompt is at {prompt_paths['conductor']}")
+        return 0
     print("ccx: Claude conductor CLI will start in this terminal.")
     return run_conductor_foreground(
         config,

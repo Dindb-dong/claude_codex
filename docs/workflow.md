@@ -22,9 +22,10 @@ One-shot launch:
 
 ```bash
 ccx run "implement the requested feature"
+ccx run --no-conductor "implement the requested feature"
 ```
 
-In run mode, Claude Opus plans the worker split, `ccx` creates run-scoped state under `.ccx/runs/<run-id>/` plus git worktrees, then cmux opens Codex worker panes while the Claude conductor starts in the current `ccx` terminal. `.ccx/current-run` points to the most recent run, and runtime commands accept `--run <run-id>` for older concurrent runs.
+In run mode, Claude Opus plans the worker split, `ccx` creates run-scoped state under `.ccx/runs/<run-id>/` plus git worktrees, then cmux opens Codex worker panes. In the Claude-first flow, run `/ccx-run <task request>` from an already-open Claude session; this uses `ccx run --no-conductor`, so that current Claude session remains the conductor instead of launching a nested Claude CLI. `.ccx/current-run` points to the most recent run, and runtime commands accept `--run <run-id>` for older concurrent runs.
 
 Codex worker panes run through `ccx agent`, which appends the generated prompt to the command and records interrupts. The Claude conductor is launched as a foreground CLI in the original `ccx` terminal so user approval, arbitration, and review happen directly inside Claude. Pressing `Ctrl-C` interrupts the active child CLI and marks the run `stopped` when the child exits with a signal status; it does not close the cmux worker workspace unless the user separately runs `ccx stop --close-cmux`.
 
