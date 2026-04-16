@@ -60,7 +60,7 @@ After the command completes:
 3. Read the conductor prompt file and follow it as your operating protocol.
 4. Review worker validations and questions before approving.
 5. Ask the user before writing the approval barrier if any scope/question is unclear.
-6. When consensus is reached, run `ccx approve <repo-path>`.
+6. When consensus is reached, run `ccx approve <repo-path> --run <run-id>`.
 7. Continue as the conductor: review handoffs, integrate branches, run checks, commit,
    push, and open PRs.
 """,

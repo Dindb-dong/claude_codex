@@ -129,19 +129,22 @@ Codex workers run through a lightweight `ccx agent` wrapper. The Claude conducto
 
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated conductor and worker prompts include an interrupt recovery rule: before resuming after an explicit user interrupt, the agent checks `ccx status --run <run-id> --json`; if the run is still stale `running`, it first runs `ccx stop --run <run-id>`.
 
-Manual state commands:
+Manual state commands use `.ccx/current-run` by default. Add `--run <run-id>` when
+you need to target a specific orchestration explicitly:
 
 ```bash
 ccx init <target-repo> <run-name> <worker-count>
 ccx validation <target-repo> <worker-id> \
+  --run <run-id> \
   --scope-coherence "Scope is coherent." \
   --overlap-check "No overlap with other workers." \
   --recommendation approve
-ccx question <target-repo> <worker-id> --title "Question" --body "Details"
-ccx resolve-question <target-repo> <question-name> --answer "Decision"
-ccx approve <target-repo>
-ccx check-barrier <target-repo>
+ccx question <target-repo> <worker-id> --run <run-id> --title "Question" --body "Details"
+ccx resolve-question <target-repo> <question-name> --run <run-id> --answer "Decision"
+ccx approve <target-repo> --run <run-id>
+ccx check-barrier <target-repo> --run <run-id>
 ccx handoff <target-repo> <worker-id> \
+  --run <run-id> \
   --branch worker/feature-area \
   --worktree /path/to/worktree \
   --summary "Implemented assigned task." \

@@ -16,6 +16,9 @@ from typing import Any
 from claude_codex.preflight import check_claude_auth
 
 STATE_DIR_NAME = ".orchestrator"
+CCX_DIR_NAME = ".ccx"
+RUNS_DIR_NAME = "runs"
+CURRENT_RUN_FILE = "current-run"
 RECOMMENDATIONS = {"approve", "revise", "reject"}
 WORKER_ID_PATTERN = re.compile(r"^worker-[0-9]{2}$")
 
@@ -128,6 +131,57 @@ def resolve_repo(raw_path: str) -> Path:
             raise CliError(f"target repository is not a git repository: {repo}")
         return Path(completed.stdout.strip()).resolve()
     return repo
+
+
+def run_state_root(repo: Path, run_id: str) -> Path:
+    """Return the run-scoped state directory.
+
+    Args:
+        repo: Target repository path.
+        run_id: Run identifier.
+    """
+    return repo / CCX_DIR_NAME / RUNS_DIR_NAME / run_id
+
+
+def read_current_run(repo: Path) -> str:
+    """Read the current ccx run pointer.
+
+    Args:
+        repo: Target repository path.
+    """
+    path = repo / CCX_DIR_NAME / CURRENT_RUN_FILE
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def resolve_command_state_paths(repo: Path, run_id: str | None = None) -> StatePaths:
+    """Resolve state paths for commands that operate on existing run state.
+
+    Args:
+        repo: Target repository path.
+        run_id: Optional explicit run identifier.
+    """
+    selected_run = run_id or read_current_run(repo)
+    if selected_run:
+        return StatePaths(repo, run_state_root(repo, selected_run))
+    legacy = StatePaths(repo)
+    if legacy.root.exists():
+        return legacy
+    return legacy
+
+
+def existing_command_state_paths(repo: Path, run_id: str | None = None) -> StatePaths:
+    """Resolve and require an existing command state directory.
+
+    Args:
+        repo: Target repository path.
+        run_id: Optional explicit run identifier.
+    """
+    paths = resolve_command_state_paths(repo, run_id)
+    if not paths.root.exists():
+        raise CliError(f"state directory does not exist: {paths.root}")
+    return paths
 
 
 def ensure_state_dirs(paths: StatePaths) -> None:
@@ -489,7 +543,7 @@ def command_check_barrier(args: argparse.Namespace) -> int:
         args: Parsed CLI arguments.
     """
     repo = resolve_repo(args.target_repo)
-    paths = StatePaths(repo)
+    paths = existing_command_state_paths(repo, args.run)
     if paths.approval_file.exists():
         print(f"approved: {paths.approval_file}")
         return 0
@@ -504,9 +558,7 @@ def command_approve(args: argparse.Namespace) -> int:
         args: Parsed CLI arguments.
     """
     repo = resolve_repo(args.target_repo)
-    paths = StatePaths(repo)
-    if not paths.root.exists():
-        raise CliError(f"state directory does not exist: {paths.root}")
+    paths = existing_command_state_paths(repo, args.run)
 
     task_files = list_markdown_files(paths.tasks)
     if not task_files:
@@ -544,7 +596,7 @@ def command_question(args: argparse.Namespace) -> int:
         args: Parsed CLI arguments.
     """
     repo = resolve_repo(args.target_repo)
-    paths = StatePaths(repo)
+    paths = existing_command_state_paths(repo, args.run)
     ensure_state_dirs(paths)
     question_file = next_question_path(paths, args.worker_id)
     content = f"""# Worker Question
@@ -583,7 +635,7 @@ def command_resolve_question(args: argparse.Namespace) -> int:
         args: Parsed CLI arguments.
     """
     repo = resolve_repo(args.target_repo)
-    paths = StatePaths(repo)
+    paths = existing_command_state_paths(repo, args.run)
     ensure_state_dirs(paths)
     source = paths.questions / args.question_name
     if not source.exists():
@@ -605,7 +657,7 @@ def command_validation(args: argparse.Namespace) -> int:
         args: Parsed CLI arguments.
     """
     repo = resolve_repo(args.target_repo)
-    paths = StatePaths(repo)
+    paths = existing_command_state_paths(repo, args.run)
     ensure_state_dirs(paths)
     validation_file = paths.validations / f"{args.worker_id}.md"
     content = f"""# Worker Validation
@@ -613,7 +665,7 @@ def command_validation(args: argparse.Namespace) -> int:
 ## Worker
 
 - ID: {args.worker_id}
-- Task file: .orchestrator/tasks/{args.worker_id}.md
+- Task file: {paths.tasks / f"{args.worker_id}.md"}
 
 ## Scope Coherence
 
@@ -651,7 +703,7 @@ def command_handoff(args: argparse.Namespace) -> int:
         args: Parsed CLI arguments.
     """
     repo = resolve_repo(args.target_repo)
-    paths = StatePaths(repo)
+    paths = existing_command_state_paths(repo, args.run)
     ensure_state_dirs(paths)
     handoff_file = paths.handoffs / f"{args.worker_id}.md"
     content = f"""# Worker Handoff
@@ -809,10 +861,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     barrier_parser = subparsers.add_parser("check-barrier", help="check approval barrier")
     barrier_parser.add_argument("target_repo")
+    barrier_parser.add_argument("--run", help="select a specific run id")
     barrier_parser.set_defaults(func=command_check_barrier)
 
     approve_parser = subparsers.add_parser("approve", help="write approval barrier")
     approve_parser.add_argument("target_repo")
+    approve_parser.add_argument("--run", help="select a specific run id")
     approve_parser.add_argument("--conductor", default="claude")
     approve_parser.add_argument(
         "--force",
@@ -824,6 +878,7 @@ def build_parser() -> argparse.ArgumentParser:
     question_parser = subparsers.add_parser("question", help="write a worker question")
     question_parser.add_argument("target_repo")
     question_parser.add_argument("worker_id", type=validate_worker_id)
+    question_parser.add_argument("--run", help="select a specific run id")
     question_parser.add_argument("--title", required=True)
     question_parser.add_argument("--body", required=True)
     question_parser.add_argument(
@@ -840,6 +895,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resolve_parser.add_argument("target_repo")
     resolve_parser.add_argument("question_name", type=resolve_question_name)
+    resolve_parser.add_argument("--run", help="select a specific run id")
     resolve_parser.add_argument("--answer", required=True)
     resolve_parser.add_argument("--force", action="store_true")
     resolve_parser.set_defaults(func=command_resolve_question)
@@ -847,6 +903,7 @@ def build_parser() -> argparse.ArgumentParser:
     validation_parser = subparsers.add_parser("validation", help="write a worker validation")
     validation_parser.add_argument("target_repo")
     validation_parser.add_argument("worker_id", type=validate_worker_id)
+    validation_parser.add_argument("--run", help="select a specific run id")
     validation_parser.add_argument("--scope-coherence", required=True)
     validation_parser.add_argument("--overlap-check", required=True)
     validation_parser.add_argument("--missing-context", default="None identified.")
@@ -863,6 +920,7 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_parser = subparsers.add_parser("handoff", help="write a worker handoff")
     handoff_parser.add_argument("target_repo")
     handoff_parser.add_argument("worker_id", type=validate_worker_id)
+    handoff_parser.add_argument("--run", help="select a specific run id")
     handoff_parser.add_argument("--branch", required=True)
     handoff_parser.add_argument("--worktree", required=True)
     handoff_parser.add_argument("--summary", required=True)
