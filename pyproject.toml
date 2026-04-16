@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "Dindb-dong" }]
+dependencies = ["prompt-toolkit>=3.0.48"]
 
 [project.scripts]
 claude-codex = "claude_codex.cli:main"

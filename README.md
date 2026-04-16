@@ -20,6 +20,10 @@ Check your environment after installation:
 ccx doctor
 ```
 
+`ccx run` uses non-interactive `claude --print` for planning. `ccx doctor`
+also checks Claude Code CLI auth; if it reports logged out, run `claude` in the
+same terminal and execute `/login` before launching ccx.
+
 ## Install
 
 Clone the repository and install editable mode:
@@ -49,6 +53,7 @@ It also installs Claude Code user slash commands into `~/.claude/commands/`:
 
 ```text
 /ccx-status   status(ccx): show orchestration state
+/ccx-run      run(ccx): start worker orchestration from current Claude
 /ccx-watch    watch(ccx): watch progress
 /ccx-resume   resume(ccx): relaunch conductor/workers
 /ccx-stop     stop(ccx): mark run stopped
@@ -58,21 +63,35 @@ Claude native slash commands remain available. The ccx commands are namespaced t
 
 ## Quick Start
 
-Run `ccx` inside the repository you want to work on:
+Recommended Claude-first flow:
+
+```bash
+cd /path/to/your-repo
+claude
+```
+
+Then run `/ccx-run <task request>` inside Claude. ccx creates run state,
+worktrees, and Codex worker panes, while the already-open Claude session remains
+the conductor.
+
+Standalone flow:
 
 ```bash
 cd /path/to/your-repo
 ccx
 ```
 
-Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, and launches a cmux workspace with one Claude conductor pane plus Codex worker panes.
+Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, launches Codex worker panes in cmux, and starts the Claude conductor in the current `ccx` terminal.
 
-At the pre-launch prompt, type `/` to preview the Claude + ccx slash command setup.
+At the pre-launch prompt, type `/` to open a styled slash-command picker. Use arrow keys
+to move and Enter to select. The list includes Claude-native command references and ccx
+commands labeled like `status(ccx)` to avoid ambiguity.
 
 One-shot form:
 
 ```bash
 ccx run "implement the requested feature"
+ccx run --no-conductor "implement the requested feature"
 ```
 
 ## Core Protocol
@@ -106,23 +125,26 @@ ccx resume --run 20260415123456000000-feature
 ccx stop --run 20260415123456000000-feature
 ```
 
-Launched Claude and Codex panes run through a lightweight `ccx agent` wrapper. Pressing `Ctrl-C` once in a conductor or worker pane interrupts the active Claude/Codex child process and marks the current ccx run as `stopped`. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux workspace.
+Codex workers run through a lightweight `ccx agent` wrapper. The Claude conductor is launched as a foreground CLI in the original `ccx` terminal so the user can approve, arbitrate, and review from Claude directly. Pressing `Ctrl-C` interrupts the active Claude/Codex child process and marks the current ccx run as `stopped` when the child exits with a signal status. The pane stays open by default; use `ccx stop --close-cmux` only when you also want to close the recorded cmux worker workspace.
 
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated conductor and worker prompts include an interrupt recovery rule: before resuming after an explicit user interrupt, the agent checks `ccx status --run <run-id> --json`; if the run is still stale `running`, it first runs `ccx stop --run <run-id>`.
 
-Manual state commands:
+Manual state commands use `.ccx/current-run` by default. Add `--run <run-id>` when
+you need to target a specific orchestration explicitly:
 
 ```bash
 ccx init <target-repo> <run-name> <worker-count>
 ccx validation <target-repo> <worker-id> \
+  --run <run-id> \
   --scope-coherence "Scope is coherent." \
   --overlap-check "No overlap with other workers." \
   --recommendation approve
-ccx question <target-repo> <worker-id> --title "Question" --body "Details"
-ccx resolve-question <target-repo> <question-name> --answer "Decision"
-ccx approve <target-repo>
-ccx check-barrier <target-repo>
+ccx question <target-repo> <worker-id> --run <run-id> --title "Question" --body "Details"
+ccx resolve-question <target-repo> <question-name> --run <run-id> --answer "Decision"
+ccx approve <target-repo> --run <run-id>
+ccx check-barrier <target-repo> --run <run-id>
 ccx handoff <target-repo> <worker-id> \
+  --run <run-id> \
   --branch worker/feature-area \
   --worktree /path/to/worktree \
   --summary "Implemented assigned task." \
@@ -158,7 +180,7 @@ export CCX_CODEX_EFFORT=medium
 
 - `docs/architecture.md`: system model and responsibilities.
 - `docs/workflow.md`: end-to-end operating flow.
-- `prompts/claude-conductor.md`: prompt for the Claude conductor pane.
+- `prompts/claude-conductor.md`: prompt for the Claude conductor running in the current ccx terminal.
 - `prompts/codex-worker.md`: prompt for each Codex worker pane.
 - `templates/`: task, validation, question, and handoff templates.
 - `src/claude_codex/`: Python CLI implementation.

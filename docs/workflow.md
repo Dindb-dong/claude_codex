@@ -12,17 +12,22 @@ cd /path/to/target-repo
 ccx
 ```
 
-At the pre-launch prompt, type `/` to preview the Claude + ccx slash command setup. The launched conductor is still a normal Claude Code session, so Claude native slash commands remain available. ccx installs additional user-level Claude slash commands named `/ccx-status`, `/ccx-watch`, `/ccx-resume`, and `/ccx-stop`; their descriptions use `status(ccx)` style labels to show they belong to ccx.
+At the pre-launch prompt, type `/` to open a styled slash-command picker with arrow-key
+navigation. The launched conductor is still a normal Claude Code session, so Claude native
+slash commands remain available. ccx installs additional user-level Claude slash commands
+named `/ccx-status`, `/ccx-watch`, `/ccx-resume`, and `/ccx-stop`; their descriptions use
+`status(ccx)` style labels to show they belong to ccx.
 
 One-shot launch:
 
 ```bash
 ccx run "implement the requested feature"
+ccx run --no-conductor "implement the requested feature"
 ```
 
-In run mode, Claude Opus plans the worker split, `ccx` creates run-scoped state under `.ccx/runs/<run-id>/` plus git worktrees, then cmux opens one Claude conductor pane and one Codex pane per worker. `.ccx/current-run` points to the most recent run, and runtime commands accept `--run <run-id>` for older concurrent runs.
+In run mode, Claude Opus plans the worker split, `ccx` creates run-scoped state under `.ccx/runs/<run-id>/` plus git worktrees, then cmux opens Codex worker panes. In the Claude-first flow, run `/ccx-run <task request>` from an already-open Claude session; this uses `ccx run --no-conductor`, so that current Claude session remains the conductor instead of launching a nested Claude CLI. `.ccx/current-run` points to the most recent run, and runtime commands accept `--run <run-id>` for older concurrent runs.
 
-Each launched pane runs through `ccx agent`, which appends the generated prompt to the Claude/Codex command and records interrupts. Pressing `Ctrl-C` once in a conductor or worker pane interrupts the active child CLI and marks the run `stopped`; it does not close the cmux workspace unless the user separately runs `ccx stop --close-cmux`.
+Codex worker panes run through `ccx agent`, which appends the generated prompt to the command and records interrupts. The Claude conductor is launched as a foreground CLI in the original `ccx` terminal so user approval, arbitration, and review happen directly inside Claude. Pressing `Ctrl-C` interrupts the active child CLI and marks the run `stopped` when the child exits with a signal status; it does not close the cmux worker workspace unless the user separately runs `ccx stop --close-cmux`.
 
 `Esc` remains handled by Claude/Codex directly. Because that may leave ccx state stale, generated prompts tell agents to run `ccx status --run <run-id> --json` before resuming after an explicit user interrupt. If the run is still `running` during interrupt recovery, the agent first runs `ccx stop --run <run-id>` and then proceeds from the user's next instruction.
 

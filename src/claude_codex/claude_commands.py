@@ -39,6 +39,33 @@ description: {self.description}
 
 COMMANDS = [
     ClaudeCommand(
+        name="ccx-run",
+        description="run(ccx): Start worker orchestration from the current Claude session",
+        argument_hint="<task request>",
+        allowed_tools=["Bash(ccx *)", "Bash(cat *)"],
+        body="""Start a ccx worker orchestration while this Claude session remains the conductor.
+
+Use this when the user wants Claude-first orchestration. Do not launch a nested Claude CLI.
+
+Run:
+
+```bash
+ccx run --no-conductor $ARGUMENTS
+```
+
+After the command completes:
+
+1. Read the printed run id and conductor prompt path.
+2. Run `ccx status --json` and summarize the run state.
+3. Read the conductor prompt file and follow it as your operating protocol.
+4. Review worker validations and questions before approving.
+5. Ask the user before writing the approval barrier if any scope/question is unclear.
+6. When consensus is reached, run `ccx approve <repo-path> --run <run-id>`.
+7. Continue as the conductor: review handoffs, integrate branches, run checks, commit,
+   push, and open PRs.
+""",
+    ),
+    ClaudeCommand(
         name="ccx-status",
         description="status(ccx): Show the current ccx orchestration state",
         argument_hint="[repo-path]",
