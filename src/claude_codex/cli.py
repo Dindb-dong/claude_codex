@@ -311,16 +311,83 @@ def list_markdown_files(directory: Path) -> list[Path]:
     return sorted(directory.glob("*.md"))
 
 
-def next_question_path(paths: StatePaths, worker_id: str) -> Path:
-    """Return the next numbered question file path for a worker.
+def local_question_path(worktree: Path, run_id: str, question_name: str) -> Path:
+    """Return the worker-local question fallback path.
+
+    Args:
+        worktree: Worker worktree path.
+        run_id: Shared ccx run id.
+        question_name: Question file name.
+    """
+    return (
+        worktree
+        / LOCAL_CCX_DIR_NAME
+        / RUNS_DIR_NAME
+        / local_run_id(run_id)
+        / "questions"
+        / question_name
+    )
+
+
+def local_question_files(state: dict[str, Any]) -> list[Path]:
+    """Return worker-local question fallback files recorded under worker worktrees.
+
+    Args:
+        state: Runtime state payload.
+    """
+    run_id = str(state.get("run_id") or "")
+    files: list[Path] = []
+    for worker in state.get("workers", []):
+        if not isinstance(worker, dict):
+            continue
+        worktree = Path(str(worker.get("worktree") or ""))
+        if not worktree:
+            continue
+        question_dir = (
+            worktree / LOCAL_CCX_DIR_NAME / RUNS_DIR_NAME / local_run_id(run_id) / "questions"
+        )
+        if question_dir.exists():
+            files.extend(sorted(question_dir.glob("*.md")))
+    return files
+
+
+def find_local_question_file(state: dict[str, Any], question_name: str) -> Path | None:
+    """Return a worker-local question fallback by file name, if present.
+
+    Args:
+        state: Runtime state payload.
+        question_name: Question file name.
+    """
+    for question_file in local_question_files(state):
+        if question_file.name == question_name:
+            return question_file
+    return None
+
+
+def next_question_name(paths: StatePaths, state: dict[str, Any], worker_id: str) -> str:
+    """Return the next numbered question file name for a worker.
 
     Args:
         paths: Resolved orchestration paths.
+        state: Runtime state payload.
         worker_id: Worker identifier.
     """
-    existing = sorted(paths.questions.glob(f"{worker_id}-*.md"))
+    shared = list(paths.questions.glob(f"{worker_id}-*.md"))
+    local = [path for path in local_question_files(state) if path.name.startswith(f"{worker_id}-")]
+    existing = sorted({path.name for path in [*shared, *local]})
     next_number = len(existing) + 1
-    return paths.questions / f"{worker_id}-{next_number:03d}.md"
+    return f"{worker_id}-{next_number:03d}.md"
+
+
+def next_question_path(paths: StatePaths, state: dict[str, Any], worker_id: str) -> Path:
+    """Return the next numbered shared question file path for a worker.
+
+    Args:
+        paths: Resolved orchestration paths.
+        state: Runtime state payload.
+        worker_id: Worker identifier.
+    """
+    return paths.questions / next_question_name(paths, state, worker_id)
 
 
 def local_run_id(run_id: str) -> str:
@@ -413,15 +480,25 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_status(paths: StatePaths) -> dict[str, Any]:
+def build_status(paths: StatePaths, state: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a machine-readable orchestration status object.
 
     Args:
         paths: Resolved orchestration paths.
+        state: Optional runtime state payload.
     """
+    state = state if state is not None else read_runtime_state(paths)
     task_files = list_markdown_files(paths.tasks)
     validation_files = list_markdown_files(paths.validations)
     question_files = list_markdown_files(paths.questions)
+    resolved_question_files = list_markdown_files(paths.resolved_questions)
+    shared_question_names = {path.name for path in question_files}
+    resolved_question_names = {path.name for path in resolved_question_files}
+    local_questions = [
+        path
+        for path in local_question_files(state)
+        if path.name not in shared_question_names and path.name not in resolved_question_names
+    ]
     handoff_files = list_markdown_files(paths.handoffs)
     validation_ids = {path.stem for path in validation_files}
     handoff_ids = {path.stem for path in handoff_files}
@@ -434,13 +511,16 @@ def build_status(paths: StatePaths) -> dict[str, Any]:
         "approved": paths.approval_file.exists(),
         "task_count": len(task_files),
         "validation_count": len(validation_files),
-        "question_count": len(question_files),
+        "question_count": len(question_files) + len(local_questions),
+        "shared_question_count": len(question_files),
+        "local_question_count": len(local_questions),
         "handoff_count": len(handoff_files),
-        "resolved_question_count": len(list_markdown_files(paths.resolved_questions)),
+        "resolved_question_count": len(resolved_question_files),
         "workers": worker_ids,
         "missing_validations": missing_validations,
         "missing_handoffs": missing_handoffs,
-        "questions": [path.name for path in question_files],
+        "questions": [path.name for path in [*question_files, *local_questions]],
+        "local_questions": [str(path) for path in local_questions],
     }
 
 
@@ -534,7 +614,8 @@ def all_validations_approve(paths: StatePaths) -> bool:
     Args:
         paths: Resolved orchestration paths.
     """
-    status = build_status(paths)
+    state = read_runtime_state(paths)
+    status = build_status(paths, state)
     if status["missing_validations"] or status["questions"]:
         return False
     validation_files = list_markdown_files(paths.validations)
@@ -817,7 +898,7 @@ def command_approve(args: argparse.Namespace) -> int:
     if not task_files:
         raise CliError("no worker tasks found")
 
-    status = build_status(paths)
+    status = build_status(paths, state)
     if status["questions"] and not args.force:
         raise CliError("open questions exist; resolve them or pass --force")
     if status["missing_validations"] and not args.force:
@@ -853,7 +934,8 @@ def command_question(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.target_repo)
     paths = existing_command_state_paths(repo, args.run)
     ensure_state_dirs(paths)
-    question_file = next_question_path(paths, args.worker_id)
+    state = read_runtime_state(paths)
+    question_file = next_question_path(paths, state, args.worker_id)
     content = f"""# Worker Question
 
 ## Worker
@@ -878,8 +960,15 @@ def command_question(args: argparse.Namespace) -> int:
 
 {args.recommendation}
 """
-    write_text(question_file, content)
-    print(f"wrote question: {question_file}")
+    run_id = command_run_id(repo, args.run, paths)
+    try:
+        write_text(question_file, content)
+        print(f"wrote question: {question_file}")
+    except PermissionError as exc:
+        fallback_file = local_question_path(Path.cwd(), run_id, question_file.name)
+        write_text(fallback_file, content, force=True)
+        print(f"warning: shared question write failed: {exc}", file=sys.stderr)
+        print(f"wrote local question fallback: {fallback_file}")
     return 0
 
 
@@ -892,9 +981,13 @@ def command_resolve_question(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.target_repo)
     paths = existing_command_state_paths(repo, args.run)
     ensure_state_dirs(paths)
+    state = read_runtime_state(paths)
     source = paths.questions / args.question_name
     if not source.exists():
-        raise CliError(f"question does not exist: {source}")
+        local_source = find_local_question_file(state, args.question_name)
+        if local_source is None:
+            raise CliError(f"question does not exist: {source}")
+        source = local_source
     resolved_content = (
         source.read_text(encoding="utf-8") + "\n## Conductor Resolution\n\n" + args.answer + "\n"
     )

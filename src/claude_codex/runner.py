@@ -36,7 +36,14 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in incomplete i
     Style = None  # type: ignore[assignment]
 
 from claude_codex.claude_commands import install_claude_commands
-from claude_codex.cli import CliError, StatePaths, ensure_state_dirs, local_handoff_path, write_text
+from claude_codex.cli import (
+    CliError,
+    StatePaths,
+    ensure_state_dirs,
+    local_handoff_path,
+    local_question_files,
+    write_text,
+)
 from claude_codex.preflight import check_claude_auth, claude_auth_failure_message
 
 MAX_AUTO_WORKERS = 5
@@ -1029,14 +1036,15 @@ Hard workflow:
    validating or implementing, keep checking with `{watch_command}` and proceed
    from the observed state.
 3. Review worker validations in {paths.validations}.
-4. If questions appear in {paths.questions}, resolve them before approval.
+4. If questions appear in {paths.questions} or as worker-local question fallbacks,
+   resolve them before approval.
 5. Only after consensus, run: ccx approve {config.repo} --run {run_id}
 6. Workers must not implement before {paths.approval_file} exists.
 7. `ccx approve` resumes recorded worker panes automatically. Do not assume workers
    will wake up from file creation alone.
 8. Review handoffs in {paths.handoffs} as they arrive. Prefer `{watch_command}`
    or `{status_command}` over long background sleep polling. Status includes
-   worker-local handoff fallbacks if a worker cannot write to shared state.
+   worker-local question and handoff fallbacks if a worker cannot write to shared state.
 9. Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not
    combine commands with `&&`, pipes, command substitution, or shell scripts unless
    the user explicitly asks.
@@ -1723,6 +1731,13 @@ def runtime_counts(paths: StatePaths, state: dict[str, Any] | None = None) -> di
     resolved = (
         list(paths.resolved_questions.glob("*.md")) if paths.resolved_questions.exists() else []
     )
+    shared_question_names = {path.name for path in questions}
+    resolved_question_names = {path.name for path in resolved}
+    local_questions = [
+        path
+        for path in local_question_files(state or {})
+        if path.name not in shared_question_names and path.name not in resolved_question_names
+    ]
     handoffs = list(paths.handoffs.glob("*.md")) if paths.handoffs.exists() else []
     shared_handoff_ids = {path.stem for path in handoffs}
     local_handoffs = local_handoff_files(state or {})
@@ -1730,9 +1745,11 @@ def runtime_counts(paths: StatePaths, state: dict[str, Any] | None = None) -> di
     return {
         "tasks": len(tasks),
         "validations": len(validations),
-        "questions": len(questions),
+        "questions": len(questions) + len(local_questions),
         "resolved_questions": len(resolved),
         "handoffs": len(shared_handoff_ids) + len(local_only_handoffs),
+        "shared_questions": len(questions),
+        "local_questions": len(local_questions),
         "shared_handoffs": len(shared_handoff_ids),
         "local_handoffs": len(local_only_handoffs),
     }
@@ -1808,6 +1825,8 @@ def format_runtime_status(status: dict[str, Any]) -> str:
             f"handoffs: {counts['handoffs']}/{counts['tasks']}",
         ]
     )
+    if counts.get("local_questions"):
+        lines.append(f"local question fallbacks: {counts['local_questions']}")
     if counts.get("local_handoffs"):
         lines.append(f"local handoff fallbacks: {counts['local_handoffs']}")
     return "\n".join(lines)

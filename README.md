@@ -143,11 +143,12 @@ starting repository's dirty tracked files and untracked non-ignored source files
 Internal orchestration directories such as `.git`, `.ccx`, `.orchestrator`, and
 `.ccx-worktrees` are excluded from that overlay.
 
-If a worker cannot write a handoff into the shared run state because the Codex
-sandbox rejects the path, `ccx handoff` writes a worker-local fallback under
-`.ccx-local/runs/<run-id>/handoffs/`. `ccx status` and `ccx watch` count those
-fallback handoffs so the conductor does not mistake completed workers for still
-running workers.
+If a worker cannot write a question or handoff into the shared run state because
+the Codex sandbox rejects the path, `ccx question` and `ccx handoff` write
+worker-local fallbacks under `.ccx-local/runs/<run-id>/questions/` or
+`.ccx-local/runs/<run-id>/handoffs/`. `ccx status`, `ccx watch`, and `ccx approve`
+count those fallback questions/handoffs so the conductor does not miss blocked or
+completed workers.
 
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated prompts include interrupt recovery rules. The conductor may mark a stale interrupted run stopped with `ccx stop --run <run-id>`. Workers only check status and report back; they do not write global stop state from their sandbox. `ccx check-barrier` refuses stopped runs even if `approved.json` already exists.
 

@@ -426,6 +426,48 @@ class CliTestCase(unittest.TestCase):
         self.assertFalse((run_root / "handoffs/worker-01.md").exists())
         self.assertIn("Implemented task.", fallback_file.read_text(encoding="utf-8"))
 
+    def test_question_writes_local_fallback_when_shared_state_is_blocked(self) -> None:
+        """question falls back to the worker worktree when shared state is not writable."""
+        run_id = "20260417000000000000-question-fallback"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "questions").mkdir(parents=True)
+        worker_worktree = self.repo / "worker-01"
+        worker_worktree.mkdir()
+
+        def fake_write_text(path: Path, content: str, *, force: bool = False) -> None:
+            if (
+                path.name == "worker-01-001.md"
+                and path.parent.name == "questions"
+                and path.parent.parent.name == run_id
+                and ".ccx" in path.parts
+            ):
+                raise PermissionError("sandbox denied shared state")
+            if path.exists() and not force:
+                raise AssertionError(f"unexpected overwrite refusal path: {path}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        with (
+            patch("claude_codex.cli.write_text", side_effect=fake_write_text),
+            patch("claude_codex.cli.Path.cwd", return_value=worker_worktree),
+        ):
+            exit_code = self.run_cli(
+                "question",
+                str(self.repo),
+                "worker-01",
+                "--run",
+                run_id,
+                "--title",
+                "Need clarification",
+                "--body",
+                "The assigned scope conflicts with the task.",
+            )
+
+        fallback_file = worker_worktree / ".ccx-local/runs" / run_id / "questions/worker-01-001.md"
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((run_root / "questions/worker-01-001.md").exists())
+        self.assertIn("Need clarification", fallback_file.read_text(encoding="utf-8"))
+
     def test_run_dry_run_uses_claude_plan_without_side_effects(self) -> None:
         """run --dry-run asks for a plan but skips state, worktree, and cmux side effects."""
         plan = {
@@ -951,6 +993,67 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(status["counts"]["handoffs"], 1)
         self.assertEqual(status["counts"]["local_handoffs"], 1)
+
+    def test_local_question_fallback_blocks_and_resolves_approval(self) -> None:
+        """local fallback questions are visible to status and block approval."""
+        from claude_codex.runner import runtime_status
+
+        run_id = "20260417000000000000-local-question"
+        run_root = self.repo / ".ccx/runs" / run_id
+        worker_worktree = self.repo / "worker-01"
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "validations").mkdir()
+        (run_root / "questions").mkdir()
+        (run_root / "approvals").mkdir()
+        worker_worktree.mkdir()
+        (run_root / "tasks/worker-01.md").write_text("# Worker Task\n", encoding="utf-8")
+        (run_root / "validations/worker-01.md").write_text(
+            "# Worker Validation\n\n## Recommendation\n\napprove\n",
+            encoding="utf-8",
+        )
+        (run_root / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "workers": [
+                        {
+                            "id": "worker-01",
+                            "worktree": str(worker_worktree),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        fallback_file = worker_worktree / ".ccx-local/runs" / run_id / "questions/worker-01-001.md"
+        fallback_file.parent.mkdir(parents=True)
+        fallback_file.write_text("# Worker Question\n\nNeed scope decision.\n", encoding="utf-8")
+
+        status = runtime_status(self.repo, run_id)
+        approve_exit_code = self.run_cli("approve", str(self.repo), "--run", run_id)
+
+        self.assertEqual(status["counts"]["questions"], 1)
+        self.assertEqual(status["counts"]["local_questions"], 1)
+        self.assertEqual(approve_exit_code, 1)
+        self.assertFalse((run_root / "approvals/approved.json").exists())
+
+        resolve_exit_code = self.run_cli(
+            "resolve-question",
+            str(self.repo),
+            "worker-01-001",
+            "--run",
+            run_id,
+            "--answer",
+            "Worker scope is approved as assigned.",
+        )
+        approve_after_resolve = self.run_cli("approve", str(self.repo), "--run", run_id)
+
+        self.assertEqual(resolve_exit_code, 0)
+        self.assertEqual(approve_after_resolve, 0)
+        self.assertFalse(fallback_file.exists())
+        self.assertTrue((run_root / "questions/resolved/worker-01-001.md").exists())
+        self.assertTrue((run_root / "approvals/approved.json").exists())
 
     def test_agent_command_wraps_child_with_prompt(self) -> None:
         """agent runs a child command with the prompt appended."""
