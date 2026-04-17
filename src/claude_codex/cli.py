@@ -15,7 +15,6 @@ from typing import Any
 
 from claude_codex.preflight import check_claude_auth
 
-STATE_DIR_NAME = ".orchestrator"
 CCX_DIR_NAME = ".ccx"
 LOCAL_CCX_DIR_NAME = ".ccx-local"
 RUNS_DIR_NAME = "runs"
@@ -30,22 +29,20 @@ class CliError(Exception):
 
 @dataclass(frozen=True)
 class StatePaths:
-    """Resolved paths for an orchestration state directory.
+    """Resolved paths for a ccx state directory.
 
     Args:
         repo: Target git repository path.
-        state_root: Optional explicit state directory root.
+        state_root: Explicit state directory root.
     """
 
     repo: Path
-    state_root: Path | None = None
+    state_root: Path
 
     @property
     def root(self) -> Path:
-        """Return the orchestration state root path."""
-        if self.state_root is not None:
-            return self.state_root
-        return self.repo / STATE_DIR_NAME
+        """Return the state root path."""
+        return self.state_root
 
     @property
     def tasks(self) -> Path:
@@ -144,6 +141,15 @@ def run_state_root(repo: Path, run_id: str) -> Path:
     return repo / CCX_DIR_NAME / RUNS_DIR_NAME / run_id
 
 
+def runs_root(repo: Path) -> Path:
+    """Return the ccx runs directory.
+
+    Args:
+        repo: Target repository path.
+    """
+    return repo / CCX_DIR_NAME / RUNS_DIR_NAME
+
+
 def read_current_run(repo: Path) -> str:
     """Read the current ccx run pointer.
 
@@ -166,10 +172,7 @@ def resolve_command_state_paths(repo: Path, run_id: str | None = None) -> StateP
     selected_run = run_id or read_current_run(repo)
     if selected_run:
         return StatePaths(repo, run_state_root(repo, selected_run))
-    legacy = StatePaths(repo)
-    if legacy.root.exists():
-        return legacy
-    return legacy
+    return StatePaths(repo, runs_root(repo))
 
 
 def existing_command_state_paths(repo: Path, run_id: str | None = None) -> StatePaths:
@@ -179,6 +182,8 @@ def existing_command_state_paths(repo: Path, run_id: str | None = None) -> State
         repo: Target repository path.
         run_id: Optional explicit run identifier.
     """
+    if run_id is None and not read_current_run(repo):
+        raise CliError("no current ccx run selected; pass --run <run-id> or start a new ccx run")
     paths = resolve_command_state_paths(repo, run_id)
     if not paths.root.exists():
         raise CliError(f"state directory does not exist: {paths.root}")
@@ -225,48 +230,6 @@ def bullet_list(items: list[str]) -> str:
     if not items:
         return "- None recorded\n"
     return "".join(f"- {item}\n" for item in items)
-
-
-def task_content(worker_id: str) -> str:
-    """Create a worker task template.
-
-    Args:
-        worker_id: Worker identifier.
-    """
-    return f"""# Worker Task
-
-## Worker
-
-- ID: {worker_id}
-- Branch:
-- Worktree:
-
-## Objective
-
-
-## Owned Scope
-
-
-## Non-Goals
-
-
-## Validation Requirements
-
-1. Confirm this scope is coherent.
-2. Confirm this scope does not overlap with other workers.
-3. Identify missing context before implementation.
-
-## Implementation Requirements
-
-Do not edit code until .orchestrator/approvals/approved.json exists.
-
-## Required Tests
-
-
-## Handoff Path
-
-.orchestrator/handoffs/{worker_id}.md
-"""
 
 
 def parse_task_file(task_file: Path) -> dict[str, Any]:
@@ -431,53 +394,6 @@ def resolve_question_name(question_name: str) -> str:
     if not name.startswith("worker-") or not name.endswith(".md"):
         raise argparse.ArgumentTypeError("question name must look like worker-NN-001.md")
     return name
-
-
-def command_init(args: argparse.Namespace) -> int:
-    """Initialize orchestration state for a target repository.
-
-    Args:
-        args: Parsed CLI arguments.
-    """
-    repo = resolve_repo(args.target_repo)
-    paths = StatePaths(repo)
-    if paths.root.exists() and any(paths.root.iterdir()) and not args.force:
-        raise CliError(f"state already exists, pass --force to overwrite templates: {paths.root}")
-
-    ensure_state_dirs(paths)
-    plan = f"""# Orchestration Plan
-
-- Run: {args.run_name}
-- Target repo: {repo}
-- Worker count: {args.worker_count}
-- Status: planning
-
-## User Request
-
-
-## Decomposition
-
-
-## Integration Strategy
-
-
-"""
-    write_text(paths.root / "plan.md", plan, force=args.force)
-
-    worktrees = [
-        "# Worktrees\n\n",
-        "## Integration\n\n",
-        "- Branch:\n",
-        "- Path:\n\n",
-        "## Workers\n\n",
-    ]
-    for index in range(1, args.worker_count + 1):
-        worker_id = f"worker-{index:02d}"
-        write_text(paths.tasks / f"{worker_id}.md", task_content(worker_id), force=args.force)
-        worktrees.append(f"- {worker_id}: see .orchestrator/tasks/{worker_id}.md\n")
-    write_text(paths.root / "worktrees.md", "".join(worktrees), force=args.force)
-    print(f"created orchestration state: {paths.root}")
-    return 0
 
 
 def build_status(paths: StatePaths, state: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1168,13 +1084,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = subparsers.add_parser("doctor", help="check required external CLIs")
     doctor_parser.set_defaults(func=command_doctor)
-
-    init_parser = subparsers.add_parser("init", help="initialize orchestration state")
-    init_parser.add_argument("target_repo")
-    init_parser.add_argument("run_name")
-    init_parser.add_argument("worker_count", type=positive_int)
-    init_parser.add_argument("--force", action="store_true", help="overwrite generated templates")
-    init_parser.set_defaults(func=command_init)
 
     status_parser = subparsers.add_parser("status", help="show orchestration status")
     status_parser.add_argument("target_repo", nargs="?", default=".")

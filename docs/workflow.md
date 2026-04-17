@@ -180,10 +180,4 @@ Claude runs formatting, linting, and tests. Then Claude splits coherent commits,
 
 Merge requires explicit human approval.
 
-## Legacy Manual Commands
-
-`ccx init` still creates the legacy `.orchestrator/` template state for manual protocol experiments. Normal orchestration uses `.ccx/runs/<run-id>/`.
-
-```bash
-ccx init <target-repo> <run-name> <worker-count>
-```
+If no `.ccx/current-run` pointer exists, run-state commands require `--run <run-id>`.

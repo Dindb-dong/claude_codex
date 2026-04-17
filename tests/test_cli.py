@@ -59,28 +59,57 @@ class CliTestCase(unittest.TestCase):
         """
         return main(list(args))
 
-    def test_init_creates_expected_state(self) -> None:
-        """init creates plan, worktree, and task files."""
-        exit_code = self.run_cli("init", str(self.repo), "demo", "2")
+    def create_run_state(self, run_id: str = "20260416000000000000-demo") -> Path:
+        """Create a minimal current-run state fixture.
 
-        self.assertEqual(exit_code, 0)
-        self.assertTrue((self.repo / ".orchestrator/plan.md").exists())
-        self.assertTrue((self.repo / ".orchestrator/worktrees.md").exists())
-        self.assertTrue((self.repo / ".orchestrator/tasks/worker-01.md").exists())
-        self.assertTrue((self.repo / ".orchestrator/tasks/worker-02.md").exists())
+        Args:
+            run_id: Run identifier to write under .ccx/runs.
+        """
+        run_root = self.repo / ".ccx/runs" / run_id
+        (self.repo / ".ccx").mkdir(exist_ok=True)
+        (self.repo / ".ccx/current-run").write_text(run_id + "\n", encoding="utf-8")
+        (run_root / "tasks").mkdir(parents=True, exist_ok=True)
+        (run_root / "validations").mkdir(exist_ok=True)
+        (run_root / "tasks/worker-01.md").write_text(
+            """# Worker Task
+
+## Worker
+
+- ID: worker-01
+- Branch: ccx/demo/worker-01
+- Worktree: /tmp/worker-01
+
+## Owned Scope
+
+- src/demo.py
+""",
+            encoding="utf-8",
+        )
+        return run_root
+
+    def test_runtime_command_without_current_run_explains_selection(self) -> None:
+        """state commands explain missing run selection instead of implying runtime legacy."""
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code = self.run_cli("approve", str(self.repo))
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("no current ccx run selected", stderr.getvalue())
+        self.assertIn("pass --run <run-id>", stderr.getvalue())
 
     def test_approve_requires_validations_without_force(self) -> None:
         """approve refuses to create a barrier before worker validations exist."""
-        self.run_cli("init", str(self.repo), "demo", "1")
+        run_root = self.create_run_state()
 
         exit_code = self.run_cli("approve", str(self.repo))
 
         self.assertEqual(exit_code, 1)
-        self.assertFalse((self.repo / ".orchestrator/approvals/approved.json").exists())
+        self.assertFalse((run_root / "approvals/approved.json").exists())
 
     def test_approve_writes_barrier_after_validation(self) -> None:
         """approve writes approved.json after all validations are present."""
-        self.run_cli("init", str(self.repo), "demo", "1")
+        run_root = self.create_run_state()
         self.run_cli(
             "validation",
             str(self.repo),
@@ -95,7 +124,7 @@ class CliTestCase(unittest.TestCase):
 
         exit_code = self.run_cli("approve", str(self.repo))
 
-        approval_file = self.repo / ".orchestrator/approvals/approved.json"
+        approval_file = run_root / "approvals/approved.json"
         self.assertEqual(exit_code, 0)
         self.assertTrue(approval_file.exists())
         payload = json.loads(approval_file.read_text(encoding="utf-8"))
@@ -293,7 +322,7 @@ class CliTestCase(unittest.TestCase):
 
     def test_open_question_blocks_approval(self) -> None:
         """approve refuses to proceed when unresolved questions exist."""
-        self.run_cli("init", str(self.repo), "demo", "1")
+        run_root = self.create_run_state()
         self.run_cli(
             "validation",
             str(self.repo),
@@ -318,11 +347,11 @@ class CliTestCase(unittest.TestCase):
         exit_code = self.run_cli("approve", str(self.repo))
 
         self.assertEqual(exit_code, 1)
-        self.assertFalse((self.repo / ".orchestrator/approvals/approved.json").exists())
+        self.assertFalse((run_root / "approvals/approved.json").exists())
 
     def test_resolved_question_allows_approval(self) -> None:
         """approve proceeds after a question is moved to the resolved archive."""
-        self.run_cli("init", str(self.repo), "demo", "1")
+        run_root = self.create_run_state()
         self.run_cli(
             "validation",
             str(self.repo),
@@ -355,12 +384,12 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(resolve_exit_code, 0)
         self.assertEqual(approve_exit_code, 0)
-        self.assertFalse((self.repo / ".orchestrator/questions/worker-01-001.md").exists())
-        self.assertTrue((self.repo / ".orchestrator/questions/resolved/worker-01-001.md").exists())
+        self.assertFalse((run_root / "questions/worker-01-001.md").exists())
+        self.assertTrue((run_root / "questions/resolved/worker-01-001.md").exists())
 
     def test_handoff_writes_worker_summary(self) -> None:
         """handoff records worker completion details."""
-        self.run_cli("init", str(self.repo), "demo", "1")
+        run_root = self.create_run_state()
 
         exit_code = self.run_cli(
             "handoff",
@@ -378,7 +407,7 @@ class CliTestCase(unittest.TestCase):
             "python -m unittest",
         )
 
-        handoff_file = self.repo / ".orchestrator/handoffs/worker-01.md"
+        handoff_file = run_root / "handoffs/worker-01.md"
         self.assertEqual(exit_code, 0)
         self.assertIn("Implemented task.", handoff_file.read_text(encoding="utf-8"))
 
@@ -502,7 +531,6 @@ class CliTestCase(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 0)
-        self.assertFalse((self.repo / ".orchestrator").exists())
 
     def test_run_fails_before_planning_when_claude_is_logged_out(self) -> None:
         """run fails fast with a recovery message when Claude auth is missing."""
@@ -656,7 +684,6 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(len(run_dirs), 1)
         self.assertEqual(run_dirs[0].name, current_run)
         self.assertTrue((run_dirs[0] / "run-state.json").exists())
-        self.assertFalse((self.repo / ".orchestrator").exists())
         conductor_prompt = (run_dirs[0] / "prompts/claude-conductor.md").read_text(encoding="utf-8")
         worker_prompt = (run_dirs[0] / "prompts/worker-01.md").read_text(encoding="utf-8")
         installed_hard_rules_path = installed_worker_hard_rules_path()

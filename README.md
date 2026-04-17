@@ -140,8 +140,8 @@ conductor can identify worker roles at a glance while panes are running.
 Worker and integration worktrees are created with `git worktree add` first. Because
 plain git worktrees only contain committed `HEAD` files, ccx then overlays the
 starting repository's dirty tracked files and untracked non-ignored source files.
-Internal orchestration directories such as `.git`, `.ccx`, `.orchestrator`, and
-`.ccx-worktrees` are excluded from that overlay.
+Internal orchestration directories such as `.git`, `.ccx`, and `.ccx-worktrees`
+are excluded from that overlay.
 
 If a worker cannot write a question or handoff into the shared run state because
 the Codex sandbox rejects the path, `ccx question` and `ccx handoff` write
@@ -164,11 +164,10 @@ compound shell commands such as `cmd && cmd`, pipes, scripts, or commands outsid
 allowlist, so generated conductor prompts tell Claude to use simple single-command
 inspection calls.
 
-Manual state commands use `.ccx/current-run` by default. Add `--run <run-id>` when
-you need to target a specific orchestration explicitly:
+Manual run-state commands use `.ccx/current-run` by default. Add `--run <run-id>`
+when you need to target a specific orchestration explicitly:
 
 ```bash
-ccx init <target-repo> <run-name> <worker-count>
 ccx validation <target-repo> <worker-id> \
   --run <run-id> \
   --scope-coherence "Scope is coherent." \
@@ -226,7 +225,6 @@ export CCX_CODEX_EFFORT=medium
 - `src/claude_codex/`: Python CLI implementation.
 - `scripts/install-local.sh`: editable install + Claude command install + doctor.
 - `scripts/claude-codex`: local wrapper for repo development.
-- `scripts/bootstrap-run.sh`: compatibility wrapper for `claude-codex init`.
 
 ## Development
 

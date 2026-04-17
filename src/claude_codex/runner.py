@@ -383,7 +383,7 @@ def ensure_git_exclude(repo: Path, patterns: list[str]) -> None:
                 handle.write(f"{pattern}\n")
 
 
-SNAPSHOT_EXCLUDED_ROOTS = {".git", ".ccx", ".orchestrator", ".ccx-worktrees"}
+SNAPSHOT_EXCLUDED_ROOTS = {".git", ".ccx", ".ccx-worktrees"}
 
 
 def should_copy_snapshot_path(relative_path: Path) -> bool:
@@ -537,7 +537,7 @@ def list_runs(repo: Path) -> list[str]:
 
 
 def resolve_state_paths(repo: Path, run_id: str | None = None) -> StatePaths:
-    """Resolve the state directory for a run or compatibility state.
+    """Resolve the state directory for a run or runs root.
 
     Args:
         repo: Target repository path.
@@ -547,9 +547,6 @@ def resolve_state_paths(repo: Path, run_id: str | None = None) -> StatePaths:
     selected_run = run_id or read_current_run(root)
     if selected_run:
         return StatePaths(root, run_state_root(root, selected_run))
-    legacy = StatePaths(root)
-    if runtime_state_path(legacy).exists():
-        return legacy
     return StatePaths(root, runs_root(root))
 
 
@@ -822,10 +819,10 @@ def markdown_list(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items) if items else "- None"
 
 
-def write_orchestrator_state(
+def write_run_state(
     config: RunConfig, plan: Plan, run_id: str, integration_worktree: Path
 ) -> StatePaths:
-    """Write shared orchestration state files.
+    """Write run-scoped shared orchestration state files.
 
     Args:
         config: Runner configuration.
@@ -2351,8 +2348,8 @@ def run_orchestration(config: RunConfig) -> int:
         print(json.dumps(raw_plan, indent=2, sort_keys=True))
         return 0
 
-    ensure_git_exclude(config.repo, [".orchestrator/", ".ccx-worktrees/"])
-    paths = write_orchestrator_state(config, plan, run_id, integration_worktree)
+    ensure_git_exclude(config.repo, [".ccx-worktrees/"])
+    paths = write_run_state(config, plan, run_id, integration_worktree)
     write_current_run(config.repo, run_id)
     print(f"ccx: wrote shared state to {paths.root}")
     state = {
