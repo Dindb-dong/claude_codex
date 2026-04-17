@@ -55,6 +55,7 @@ It also installs Claude Code user slash commands into `~/.claude/commands/`:
 /ccx-status   status(ccx): show orchestration state
 /ccx-run      run(ccx): start worker orchestration from current Claude
 /ccx-watch    watch(ccx): watch progress
+/ccx-integrate integrate(ccx): merge completed worker branches
 /ccx-resume   resume(ccx): relaunch conductor/workers
 /ccx-stop     stop(ccx): mark run stopped
 ```
@@ -106,7 +107,7 @@ ccx run --no-conductor "implement the requested feature"
 8. Workers also poll the approval barrier after validation, then implement independently.
 9. Workers stop only themselves when new uncertainty appears.
 10. Workers write handoff documents when done.
-11. Claude watches progress with `ccx watch`, reviews handoffs, integrates branches, resolves conflicts, and runs checks.
+11. Claude watches progress with `ccx watch`, reviews handoffs, runs `ccx integrate`, resolves conflicts, and runs checks.
 12. Claude splits commits, pushes, opens a PR, and waits for explicit human approval before merge.
 
 ## Runtime Commands
@@ -177,6 +178,7 @@ ccx question <target-repo> <worker-id> --run <run-id> --title "Question" --body 
 ccx resolve-question <target-repo> <question-name> --run <run-id> --answer "Decision"
 ccx approve <target-repo> --run <run-id>
 ccx approve <target-repo> --run <run-id> --no-notify-workers
+ccx integrate <target-repo> --run <run-id>
 ccx check-barrier <target-repo> --run <run-id>
 ccx handoff <target-repo> <worker-id> \
   --run <run-id> \
@@ -207,6 +209,7 @@ export CCX_CODEX_EFFORT=medium
 - Workers must not edit files before the run approval barrier exists.
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - `ccx approve` should notify recorded worker panes; workers also wait on `ccx check-barrier`.
+- `ccx integrate` should merge only handed-off worker branches into the integration worktree and write an integration report.
 - `ccx check-barrier` blocks stopped runs even when the approval file exists.
 - `ccx status` and `ccx watch` include worker-local question and handoff fallbacks.
 - Same-file edits by multiple workers require explicit Claude arbitration.

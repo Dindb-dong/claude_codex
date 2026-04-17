@@ -211,6 +211,12 @@ def slash_commands() -> list[SlashCommand]:
         SlashCommand("/status", "status(ccx): Show current orchestration state", "ccx", "status"),
         SlashCommand("/watch", "watch(ccx): Watch orchestration progress", "ccx", "watch"),
         SlashCommand(
+            "/integrate",
+            "integrate(ccx): Merge completed worker branches",
+            "ccx",
+            "integrate",
+        ),
+        SlashCommand(
             "/resume", "resume(ccx): Relaunch conductor and worker panes", "ccx", "resume"
         ),
         SlashCommand("/stop", "stop(ccx): Mark current run stopped", "ccx", "stop"),
@@ -1009,6 +1015,7 @@ def conductor_prompt(
     """
     watch_command = f"ccx watch {config.repo} --run {run_id} --once"
     status_command = f"ccx status {config.repo} --run {run_id}"
+    integrate_command = f"ccx integrate {config.repo} --run {run_id}"
     return f"""You are the Claude conductor for this ccx run.
 
 Model role:
@@ -1048,7 +1055,9 @@ Hard workflow:
 10. If you inspect cmux worker output, use `cmux read-screen --workspace <workspace>
    --surface <surface> --scrollback --lines 80`.
    Do not use `cmux read-pane`; that is not a cmux command.
-11. Integrate worker branches into {integration_worktree}.
+11. Once all handoffs are present, run `{integrate_command}` to merge worker
+   branches into {integration_worktree}. If integration fails, read the report
+   under {paths.root / "integration"} and resolve or reassign focused fixes.
 12. Resolve conflicts or reassign focused fixes.
 13. Run formatting, linting, and tests.
 14. Split coherent commits and push a branch/PR.

@@ -71,8 +71,8 @@ After the command completes:
 6. Ask the user before writing the approval barrier only if a scope/question is
    genuinely unclear after your review.
 7. When consensus is reached, run `ccx approve <repo-path> --run <run-id>`.
-8. Continue as the conductor: review handoffs, integrate branches, run checks, commit,
-   push, and open PRs.
+8. Continue as the conductor: review handoffs, run `ccx integrate <repo-path>
+   --run <run-id>`, run checks, commit, push, and open PRs.
 
 Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not chain
 commands with `&&`, pipes, command substitution, or shell scripts unless the user
@@ -107,6 +107,23 @@ ccx watch $ARGUMENTS
 ```
 
 Stop watching when the user asks you to stop or when the command exits.
+""",
+    ),
+    ClaudeCommand(
+        name="ccx-integrate",
+        description="integrate(ccx): Merge completed worker branches",
+        argument_hint="[repo-path] [--run run-id]",
+        allowed_tools=ROUTINE_ALLOWED_TOOLS,
+        body="""Merge completed ccx worker branches into the integration worktree.
+
+Run this only after worker handoffs are present and open questions are resolved:
+
+```bash
+ccx integrate $ARGUMENTS
+```
+
+If integration fails, read the printed report path and decide whether to resolve
+the conflict directly or create a focused follow-up worker task.
 """,
     ),
     ClaudeCommand(
