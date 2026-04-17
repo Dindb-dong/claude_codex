@@ -1049,39 +1049,12 @@ Start by reading {paths.root / "plan.md"} and the task files.
 """
 
 
-def worker_hard_rules_prompt(config: RunConfig, paths: StatePaths, run_id: str) -> str:
-    """Build the shared hard-rules prompt for every Codex worker.
-
-    Args:
-        config: Runner configuration.
-        paths: Shared state paths.
-        run_id: Run identifier.
-    """
-    return f"""# ccx Worker Hard Rules
-
-These rules apply to every Codex worker in this run.
-
-1. First validate your task boundary only. Do not edit code yet.
-2. If anything is ambiguous, overlapping, or risky, write a question and pause.
-3. If validation has no blocking question, wait for approval before implementation.
-4. Do not implement until this approval barrier exists and ccx check-barrier succeeds:
-   {paths.approval_file}
-5. Work only in your assigned worker worktree after approval.
-6. If uncertainty appears during implementation, pause only yourself and write a question.
-7. On completion, write a ccx handoff.
-   If ccx reports "wrote local handoff fallback", treat that as a successful
-   handoff and tell the conductor the fallback path.
-8. Do not merge or push.
-9. The Codex session is launched with this shared state directory as an additional
-   writable root, so do not ask the user for approval just to write validation,
-   question, approval-check, or handoff files under: {paths.root}
-10. Your Codex approval policy is non-interactive. Do not ask the user to approve
-    ccx validation/question/handoff writes. If ccx handoff writes a local fallback,
-    continue reporting completion. For any other sandboxed command failure, report
-    the exact failure to the conductor and stop.
-
-{interrupt_recovery_prompt(config, run_id, role="worker")}
-"""
+def installed_worker_hard_rules_path() -> Path:
+    """Return the installed static hard-rules file for Codex workers."""
+    path = Path(__file__).parent / "prompts" / "hard_rules.md"
+    if not path.exists():
+        raise CliError(f"missing installed worker hard-rules file: {path}")
+    return path
 
 
 def worker_prompt(
@@ -1105,6 +1078,7 @@ def worker_prompt(
         '--scope-coherence "..." --overlap-check "..." --recommendation approve'
     )
     barrier_wait_command = f"until ccx check-barrier {config.repo} --run {run_id}; do sleep 5; done"
+    status_command = f"ccx status {config.repo} --run {run_id} --json"
     question_command = (
         f'ccx question {config.repo} {task.worker_id} --run {run_id} --title "..." --body "..."'
     )
@@ -1121,16 +1095,25 @@ Target request:
 Shared state directory:
 {paths.root}
 
-Common hard rules:
-@{hard_rules_path}
+Installed common hard rules:
+{hard_rules_path}
 
-Read the common hard rules file before doing anything.
+Read that file from disk before doing anything. Do not use `@file` prompt
+expansion for the hard rules; the file is installed with ccx and should be
+opened only as normal local context.
 
 Your task file:
 {paths.tasks / f"{task.worker_id}.md"}
 
 Your worktree after approval:
 {task.worktree}
+
+Run-specific facts:
+- Approval barrier: {paths.approval_file}
+- Shared state directory: {paths.root}
+- This shared state directory is passed as an additional writable root.
+- If resuming after an explicit user interrupt, check status with:
+  {status_command}
 
 Required commands:
 - Write validation:
@@ -1171,12 +1154,7 @@ def write_prompt_files(
         force=config.force_state,
     )
     prompt_paths["conductor"] = conductor_path
-    hard_rules_path = prompt_dir / "hard_rules.md"
-    write_text(
-        hard_rules_path,
-        worker_hard_rules_prompt(config, paths, run_id),
-        force=config.force_state,
-    )
+    hard_rules_path = installed_worker_hard_rules_path()
     prompt_paths["hard_rules"] = hard_rules_path
     for task in plan.tasks:
         path = prompt_dir / f"{task.worker_id}.md"

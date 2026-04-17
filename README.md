@@ -148,9 +148,10 @@ running workers.
 
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated prompts include interrupt recovery rules. The conductor may mark a stale interrupted run stopped with `ccx stop --run <run-id>`. Workers only check status and report back; they do not write global stop state from their sandbox. `ccx check-barrier` refuses stopped runs even if `approved.json` already exists.
 
-Worker prompts reference a shared `prompts/hard_rules.md` file instead of duplicating
+Worker prompts reference the installed ccx hard-rules file instead of duplicating
 the full common protocol into every worker prompt. Each worker prompt contains only
-the task-specific paths and commands plus an `@.../hard_rules.md` reference.
+the task-specific paths and commands plus the installed rules path, avoiding `@file`
+prompt expansion for the shared rules.
 
 Installed Claude slash commands include routine allowed tools for `ccx`, `cmux
 read-screen`, `ls`, and `cat`. Claude may still ask for confirmation when it chooses
@@ -214,7 +215,7 @@ export CCX_CODEX_EFFORT=medium
 - `docs/architecture.md`: system model and responsibilities.
 - `docs/workflow.md`: end-to-end operating flow.
 - `prompts/claude-conductor.md`: prompt for the Claude conductor running in the current ccx terminal.
-- `prompts/hard_rules.md`: shared worker protocol referenced by every worker prompt.
+- `src/claude_codex/prompts/hard_rules.md`: installed shared worker protocol referenced by every worker prompt.
 - `prompts/worker-NN.md`: task-specific prompt for each Codex worker pane.
 - `templates/`: task, validation, question, and handoff templates.
 - `src/claude_codex/`: Python CLI implementation.
