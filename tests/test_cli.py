@@ -1113,6 +1113,21 @@ Implemented worker output.
         self.assertIn("--add-dir", command)
         self.assertEqual(command[command.index("--add-dir") + 1], str(run_root))
 
+    def test_claude_child_command_omits_model_when_inheriting_default(self) -> None:
+        """Claude conductor commands omit --model unless explicitly configured."""
+        from claude_codex.cli import StatePaths
+        from claude_codex.runner import claude_child_command
+
+        paths = StatePaths(repo=self.repo, state_root=self.repo / ".ccx/runs/run-1")
+
+        inherited = claude_child_command(self.repo, paths, model="", effort="medium")
+        explicit = claude_child_command(self.repo, paths, model="opus", effort="medium")
+
+        self.assertNotIn("--model", inherited)
+        self.assertIn("--model", explicit)
+        self.assertEqual(explicit[explicit.index("--model") + 1], "opus")
+        self.assertIn("--effort", inherited)
+
     def test_status_supports_target_repo(self) -> None:
         """status prints runtime state for a target repository."""
         exit_code = self.run_cli("status", str(self.repo))
@@ -1473,6 +1488,66 @@ Implemented worker output.
         self.assertEqual(plan["summary"], "Update UI")
         self.assertIn("--output-format", captured_command)
         self.assertIn("json", captured_command)
+        self.assertIn("--model", captured_command)
+        self.assertEqual(captured_command[captured_command.index("--model") + 1], "opus")
+
+    def test_request_plan_omits_model_when_inheriting_claude_default(self) -> None:
+        """Planner calls do not force Opus when no Claude model is configured."""
+        from claude_codex.runner import RunConfig, request_plan
+
+        captured_command: list[str] = []
+
+        class FakeProcess:
+            """Minimal process stub for Claude planner subprocess."""
+
+            returncode = 0
+
+            def communicate(self, timeout: int) -> tuple[str, str]:
+                output = json.dumps(
+                    {
+                        "structured_output": {
+                            "summary": "Update UI",
+                            "worker_count": 1,
+                            "tasks": [
+                                {
+                                    "title": "UI update",
+                                    "objective": "Implement it.",
+                                    "owned_scope": ["src"],
+                                    "non_goals": [],
+                                    "required_tests": [],
+                                }
+                            ],
+                        }
+                    }
+                )
+                return output, ""
+
+        def fake_popen(command: list[str], **_: object) -> FakeProcess:
+            captured_command.extend(command)
+            return FakeProcess()
+
+        config = RunConfig(
+            repo=self.repo,
+            request="make the UI cleaner",
+            claude_model="",
+            claude_effort="medium",
+            codex_model="gpt-5.3-codex",
+            codex_effort="medium",
+            requested_workers=1,
+            dry_run=True,
+            skip_launch=False,
+            force_state=False,
+        )
+
+        with (
+            patch("claude_codex.runner.collect_repo_snapshot", return_value="Repository snapshot"),
+            patch("claude_codex.runner.subprocess.Popen", side_effect=fake_popen),
+        ):
+            plan = request_plan(config)
+
+        self.assertEqual(plan["summary"], "Update UI")
+        self.assertNotIn("--model", captured_command)
+        self.assertIn("--effort", captured_command)
 
     def test_planner_prompt_caps_workers_at_five(self) -> None:
         """Claude planner instructions advertise the five-worker cap."""
@@ -1492,7 +1567,9 @@ Implemented worker output.
         )
         schema = json.loads(planner_schema())
 
-        self.assertIn("Choose 1-5 Codex workers.", planner_prompt(config, "snapshot"))
+        prompt = planner_prompt(config, "snapshot")
+        self.assertIn("Choose 1-5 Codex workers.", prompt)
+        self.assertNotIn("Claude Opus", prompt)
         self.assertEqual(schema["properties"]["worker_count"]["maximum"], 5)
         self.assertEqual(schema["properties"]["tasks"]["maxItems"], 5)
 
