@@ -66,9 +66,12 @@ After the command completes:
 2. Run `ccx status --json` and summarize the run state.
 3. Read the conductor prompt file and follow it as your operating protocol.
 4. Review worker validations and questions before approving.
-5. Ask the user before writing the approval barrier if any scope/question is unclear.
-6. When consensus is reached, run `ccx approve <repo-path> --run <run-id>`.
-7. Continue as the conductor: review handoffs, integrate branches, run checks, commit,
+5. Do not ask the user whether to poll, wait, or watch. Use `ccx watch --once`
+   to inspect progress and proceed from observed state.
+6. Ask the user before writing the approval barrier only if a scope/question is
+   genuinely unclear after your review.
+7. When consensus is reached, run `ccx approve <repo-path> --run <run-id>`.
+8. Continue as the conductor: review handoffs, integrate branches, run checks, commit,
    push, and open PRs.
 
 Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not chain
