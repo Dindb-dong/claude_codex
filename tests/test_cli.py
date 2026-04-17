@@ -623,7 +623,16 @@ class CliTestCase(unittest.TestCase):
         resolved_repo = self.repo.resolve()
         self.assertIn("Esc may interrupt Claude/Codex without notifying ccx", conductor_prompt)
         self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
+        self.assertIn("Do not ask the user whether to poll, wait, or watch", conductor_prompt)
+        self.assertIn(
+            f"Immediately run `ccx watch {resolved_repo} --run {current_run} --once`",
+            conductor_prompt,
+        )
         self.assertIn(str(installed_hard_rules_path), worker_prompt)
+        self.assertIn("Task assignment:", worker_prompt)
+        self.assertIn("- title: UI update", worker_prompt)
+        self.assertIn("- objective: Implement the requested UI update.", worker_prompt)
+        self.assertNotIn("Request:\nmake the UI cleaner", worker_prompt)
         self.assertIn("Do not use `@file`", worker_prompt)
         self.assertNotIn(f"@{installed_hard_rules_path}", worker_prompt)
         self.assertNotIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)

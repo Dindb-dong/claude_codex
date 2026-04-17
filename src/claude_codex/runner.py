@@ -1024,26 +1024,30 @@ Plan summary:
 {plan.summary}
 
 Hard workflow:
-1. Review worker validations in {paths.validations}.
-2. If questions appear in {paths.questions}, resolve them before approval.
-3. Only after consensus, run: ccx approve {config.repo} --run {run_id}
-4. Workers must not implement before {paths.approval_file} exists.
-5. `ccx approve` resumes recorded worker panes automatically. Do not assume workers
+1. Immediately run `{watch_command}` to capture current worker state.
+2. Do not ask the user whether to poll, wait, or watch. When workers are still
+   validating or implementing, keep checking with `{watch_command}` and proceed
+   from the observed state.
+3. Review worker validations in {paths.validations}.
+4. If questions appear in {paths.questions}, resolve them before approval.
+5. Only after consensus, run: ccx approve {config.repo} --run {run_id}
+6. Workers must not implement before {paths.approval_file} exists.
+7. `ccx approve` resumes recorded worker panes automatically. Do not assume workers
    will wake up from file creation alone.
-6. Review handoffs in {paths.handoffs} as they arrive. Prefer `{watch_command}`
+8. Review handoffs in {paths.handoffs} as they arrive. Prefer `{watch_command}`
    or `{status_command}` over long background sleep polling. Status includes
    worker-local handoff fallbacks if a worker cannot write to shared state.
-7. Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not
+9. Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not
    combine commands with `&&`, pipes, command substitution, or shell scripts unless
    the user explicitly asks.
-8. If you inspect cmux worker output, use `cmux read-screen --workspace <workspace>
+10. If you inspect cmux worker output, use `cmux read-screen --workspace <workspace>
    --surface <surface> --scrollback --lines 80`.
    Do not use `cmux read-pane`; that is not a cmux command.
-9. Integrate worker branches into {integration_worktree}.
-10. Resolve conflicts or reassign focused fixes.
-11. Run formatting, linting, and tests.
-12. Split coherent commits and push a branch/PR.
-13. Do not merge without explicit human approval.
+11. Integrate worker branches into {integration_worktree}.
+12. Resolve conflicts or reassign focused fixes.
+13. Run formatting, linting, and tests.
+14. Split coherent commits and push a branch/PR.
+15. Do not merge without explicit human approval.
 
 {interrupt_recovery_prompt(config, run_id, role="conductor")}
 
@@ -1094,8 +1098,17 @@ def worker_prompt(
 Protocol: read {hard_rules_path} from disk before acting. Do not use `@file`
 expansion for this installed static protocol.
 
-Request:
-{config.request}
+Task assignment:
+- title: {task.title}
+- objective: {task.objective}
+- owned scope:
+{markdown_list(task.owned_scope)}
+- non-goals:
+{markdown_list(task.non_goals)}
+- required tests:
+{markdown_list(task.required_tests)}
+- known risks:
+{markdown_list(task.risks)}
 
 Run contract:
 - task: {paths.tasks / f"{task.worker_id}.md"}

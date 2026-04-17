@@ -97,7 +97,7 @@ ccx run --no-conductor "implement the requested feature"
 ## Core Protocol
 
 1. Claude creates an integration worktree and decomposes the user request.
-2. Claude creates isolated worker worktrees and sends validation-only tasks to Codex workers.
+2. Claude creates isolated worker worktrees and sends task-specific validation prompts to Codex workers.
 3. Codex workers validate scope first and do not edit code before approval.
 4. If a task is unclear, overlapping, or risky, the worker writes a question and stops.
 5. When every validation recommends approval, ccx nudges the recorded conductor pane.
@@ -106,7 +106,7 @@ ccx run --no-conductor "implement the requested feature"
 8. Workers also poll the approval barrier after validation, then implement independently.
 9. Workers stop only themselves when new uncertainty appears.
 10. Workers write handoff documents when done.
-11. Claude reviews handoffs, integrates branches, resolves conflicts, and runs checks.
+11. Claude watches progress with `ccx watch`, reviews handoffs, integrates branches, resolves conflicts, and runs checks.
 12. Claude splits commits, pushes, opens a PR, and waits for explicit human approval before merge.
 
 ## Runtime Commands
@@ -153,8 +153,9 @@ running workers.
 
 Worker prompts reference the installed `ccx-worker-protocol/v1` file instead of
 duplicating the common protocol into every worker prompt. Each worker prompt
-contains only the task-specific paths and command shapes plus the installed rules
-path, avoiding `@file` prompt expansion for the shared rules.
+contains the planner-assigned worker task, task-specific paths, and command shapes
+plus the installed rules path, avoiding `@file` prompt expansion for the shared
+rules. Worker prompts do not repeat the full user request as the worker assignment.
 
 Installed Claude slash commands include routine allowed tools for `ccx`, `cmux
 read-screen`, `ls`, and `cat`. Claude may still ask for confirmation when it chooses
