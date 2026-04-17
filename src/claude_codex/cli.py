@@ -868,7 +868,7 @@ def command_run(args: argparse.Namespace) -> int:
     Args:
         args: Parsed CLI arguments.
     """
-    from claude_codex.runner import RunConfig, run_orchestration
+    from claude_codex.runner import MAX_AUTO_WORKERS, RunConfig, run_orchestration
 
     request = " ".join(args.request).strip()
     if not request:
@@ -878,6 +878,8 @@ def command_run(args: argparse.Namespace) -> int:
             raise CliError("request is required when stdin is not interactive") from exc
     if not request:
         raise CliError("request is required")
+    if args.workers and args.workers > MAX_AUTO_WORKERS:
+        raise CliError(f"worker count must be {MAX_AUTO_WORKERS} or less")
     config = RunConfig(
         repo=Path(args.repo).expanduser().resolve(),
         request=request,
