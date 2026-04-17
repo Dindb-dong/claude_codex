@@ -376,6 +376,16 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_run_rejects_more_than_five_workers(self) -> None:
+        """run caps manual worker requests at the planner maximum."""
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code = self.run_cli("run", "--repo", str(self.repo), "--workers", "6", "do work")
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("worker count must be 5 or less", stderr.getvalue())
+
     def test_default_prompt_interrupt_exits_cleanly(self) -> None:
         """Ctrl-C at the default prompt exits without a traceback."""
         stderr = StringIO()
@@ -582,7 +592,7 @@ class CliTestCase(unittest.TestCase):
 
         tasks = []
         prompt_paths = {}
-        for index in range(1, 4):
+        for index in range(1, 6):
             worker_id = f"worker-{index:02d}"
             tasks.append(
                 WorkerTask(
@@ -620,17 +630,20 @@ class CliTestCase(unittest.TestCase):
         ):
             launch = launch_cmux_workers_in_current_workspace(
                 config,
-                Plan(summary="Update UI", worker_count=3, tasks=tasks),
+                Plan(summary="Update UI", worker_count=5, tasks=tasks),
                 prompt_paths,
                 "run-1",
             )
 
         flattened = [" ".join(command[:2]) for command in calls]
         self.assertEqual(launch.workspace, "workspace:captured")
-        self.assertEqual([pane.pane for pane in launch.panes], ["pane:2", "pane:3", "pane:4"])
+        self.assertEqual(
+            [pane.pane for pane in launch.panes],
+            ["pane:2", "pane:3", "pane:4", "pane:5", "pane:6"],
+        )
         self.assertEqual(
             [pane.surface for pane in launch.panes],
-            ["surface:2", "surface:3", "surface:4"],
+            ["surface:2", "surface:3", "surface:4", "surface:5", "surface:6"],
         )
         self.assertNotIn(["cmux", "current-workspace"], calls)
         self.assertNotIn("cmux new-workspace", flattened)
@@ -639,12 +652,12 @@ class CliTestCase(unittest.TestCase):
         split_commands = [command for command in calls if command[:2] == ["cmux", "new-pane"]]
         self.assertEqual(
             [command[command.index("--direction") + 1] for command in split_commands],
-            ["right", "down", "down"],
+            ["right", "down", "down", "right", "right"],
         )
         focus_commands = [command for command in calls if command[:2] == ["cmux", "focus-pane"]]
         self.assertEqual(
             [command[command.index("--pane") + 1] for command in focus_commands],
-            ["pane:1", "pane:1", "pane:2", "pane:1"],
+            ["pane:1", "pane:1", "pane:2", "pane:3", "pane:4", "pane:1"],
         )
         respawn_command = next(
             command for command in calls if command[:2] == ["cmux", "respawn-pane"]
@@ -926,6 +939,28 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(plan["summary"], "Update UI")
         self.assertIn("--output-format", captured_command)
         self.assertIn("json", captured_command)
+
+    def test_planner_prompt_caps_workers_at_five(self) -> None:
+        """Claude planner instructions advertise the five-worker cap."""
+        from claude_codex.runner import RunConfig, planner_prompt, planner_schema
+
+        config = RunConfig(
+            repo=self.repo,
+            request="make the UI cleaner",
+            claude_model="opus",
+            claude_effort="medium",
+            codex_model="gpt-5.3-codex",
+            codex_effort="medium",
+            requested_workers=None,
+            dry_run=True,
+            skip_launch=False,
+            force_state=False,
+        )
+        schema = json.loads(planner_schema())
+
+        self.assertIn("Choose 1-5 Codex workers.", planner_prompt(config, "snapshot"))
+        self.assertEqual(schema["properties"]["worker_count"]["maximum"], 5)
+        self.assertEqual(schema["properties"]["tasks"]["maxItems"], 5)
 
 
 if __name__ == "__main__":
