@@ -187,3 +187,7 @@ Merge requires explicit human approval.
 ```bash
 ccx init <target-repo> <run-name> <worker-count>
 ```
+
+If no `.ccx/current-run` pointer exists, run-state commands require `--run <run-id>`
+unless you are intentionally operating on an existing legacy `.orchestrator/`
+template directory.

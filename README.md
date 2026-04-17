@@ -164,11 +164,10 @@ compound shell commands such as `cmd && cmd`, pipes, scripts, or commands outsid
 allowlist, so generated conductor prompts tell Claude to use simple single-command
 inspection calls.
 
-Manual state commands use `.ccx/current-run` by default. Add `--run <run-id>` when
-you need to target a specific orchestration explicitly:
+Manual run-state commands use `.ccx/current-run` by default. Add `--run <run-id>`
+when you need to target a specific orchestration explicitly:
 
 ```bash
-ccx init <target-repo> <run-name> <worker-count>
 ccx validation <target-repo> <worker-id> \
   --run <run-id> \
   --scope-coherence "Scope is coherent." \
@@ -187,6 +186,10 @@ ccx handoff <target-repo> <worker-id> \
   --file src/example.py \
   --test "python -m unittest"
 ```
+
+`ccx init <target-repo> <run-name> <worker-count>` is retained only for legacy
+manual `.orchestrator/` template experiments. Normal orchestration should start
+with `ccx`, `ccx run`, or `/ccx-run`, which create `.ccx/runs/<run-id>/`.
 
 ## Default Models
 
@@ -226,7 +229,7 @@ export CCX_CODEX_EFFORT=medium
 - `src/claude_codex/`: Python CLI implementation.
 - `scripts/install-local.sh`: editable install + Claude command install + doctor.
 - `scripts/claude-codex`: local wrapper for repo development.
-- `scripts/bootstrap-run.sh`: compatibility wrapper for `claude-codex init`.
+- `scripts/bootstrap-run.sh`: compatibility wrapper for legacy `claude-codex init`.
 
 ## Development
 

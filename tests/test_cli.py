@@ -59,8 +59,8 @@ class CliTestCase(unittest.TestCase):
         """
         return main(list(args))
 
-    def test_init_creates_expected_state(self) -> None:
-        """init creates plan, worktree, and task files."""
+    def test_init_creates_legacy_manual_state(self) -> None:
+        """init creates legacy manual plan, worktree, and task files."""
         exit_code = self.run_cli("init", str(self.repo), "demo", "2")
 
         self.assertEqual(exit_code, 0)
@@ -68,6 +68,17 @@ class CliTestCase(unittest.TestCase):
         self.assertTrue((self.repo / ".orchestrator/worktrees.md").exists())
         self.assertTrue((self.repo / ".orchestrator/tasks/worker-01.md").exists())
         self.assertTrue((self.repo / ".orchestrator/tasks/worker-02.md").exists())
+
+    def test_runtime_command_without_current_run_explains_selection(self) -> None:
+        """state commands explain missing run selection instead of implying runtime legacy."""
+        stderr = StringIO()
+
+        with redirect_stderr(stderr):
+            exit_code = self.run_cli("approve", str(self.repo))
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("no current ccx run selected", stderr.getvalue())
+        self.assertIn("pass --run <run-id>", stderr.getvalue())
 
     def test_approve_requires_validations_without_force(self) -> None:
         """approve refuses to create a barrier before worker validations exist."""
