@@ -82,7 +82,7 @@ cd /path/to/your-repo
 ccx
 ```
 
-Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, overlays current uncommitted tracked changes and untracked source files from the starting repository, launches Codex worker panes in cmux, and starts the Claude conductor in the current `ccx` terminal.
+Then describe the task. `ccx` asks Claude to decide the worker split using the active Claude CLI default unless you explicitly configure a model, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, overlays current uncommitted tracked changes and untracked source files from the starting repository, launches Codex worker panes in cmux, and starts the Claude conductor in the current `ccx` terminal.
 
 At the pre-launch prompt, type `/` to open a styled slash-command picker. Use arrow keys
 to move and Enter to select. The list includes Claude-native command references and ccx
@@ -191,14 +191,15 @@ ccx handoff <target-repo> <worker-id> \
 
 ## Default Models
 
-- Claude conductor: `opus`, effort `medium`.
+- Claude planner/conductor: inherits the active Claude CLI default model unless `--claude-model` or `CCX_CLAUDE_MODEL` is set; effort defaults to `medium`.
 - Codex workers: `gpt-5.3-codex`, reasoning effort `medium`.
 - Human label `normal` is treated as `medium` internally because the installed CLIs accept `medium`, not `normal`.
 
 Environment overrides:
 
 ```bash
-export CCX_CLAUDE_MODEL=opus
+# Optional: only set this when you want ccx to force a Claude model.
+export CCX_CLAUDE_MODEL=sonnet
 export CCX_CLAUDE_EFFORT=medium
 export CCX_CODEX_MODEL=gpt-5.3-codex
 export CCX_CODEX_EFFORT=medium

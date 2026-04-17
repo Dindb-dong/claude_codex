@@ -104,6 +104,7 @@ class RunConfig:
         repo: Target git repository.
         request: User request to implement.
         claude_model: Claude conductor model alias or full name.
+            Empty means use the Claude CLI default.
         claude_effort: Claude effort level.
         codex_model: Codex worker model.
         codex_effort: Codex reasoning effort.
@@ -326,6 +327,18 @@ def normalize_effort(value: str) -> str:
     """
     normalized = value.strip().lower()
     return EFFORT_ALIASES.get(normalized, normalized)
+
+
+def append_optional_cli_arg(command: list[str], flag: str, value: str) -> None:
+    """Append a flag/value pair only when the value is explicitly configured.
+
+    Args:
+        command: Mutable command argument list.
+        flag: CLI flag name.
+        value: Flag value. Empty values mean inherit the child CLI default.
+    """
+    if value:
+        command.extend([flag, value])
 
 
 def slugify(value: str, *, max_length: int = 32) -> str:
@@ -666,7 +679,7 @@ def planner_prompt(config: RunConfig, snapshot: str) -> str:
         if config.requested_workers
         else f"Choose 1-{MAX_AUTO_WORKERS} Codex workers."
     )
-    return f"""You are the Claude Opus conductor for a Claude + Codex cmux workflow.
+    return f"""You are the Claude conductor for a Claude + Codex cmux workflow.
 
 User request:
 {config.request}
@@ -730,14 +743,10 @@ def request_plan(config: RunConfig) -> dict[str, Any]:
         "--print",
         "--output-format",
         "json",
-        "--model",
-        config.claude_model,
-        "--effort",
-        config.claude_effort,
-        "--json-schema",
-        planner_schema(),
-        planner_prompt(config, snapshot),
     ]
+    append_optional_cli_arg(command, "--model", config.claude_model)
+    append_optional_cli_arg(command, "--effort", config.claude_effort)
+    command.extend(["--json-schema", planner_schema(), planner_prompt(config, snapshot)])
     print("ccx: starting Claude planner CLI...", flush=True)
     try:
         process = subprocess.Popen(
@@ -1313,20 +1322,14 @@ def claude_child_command(repo: Path, paths: StatePaths, *, model: str, effort: s
     Args:
         repo: Target repository path.
         paths: Shared state paths.
-        model: Claude model.
+        model: Claude model. Empty means use the Claude CLI default.
         effort: Claude effort.
     """
-    return [
-        "claude",
-        "--model",
-        model,
-        "--effort",
-        effort,
-        "--add-dir",
-        str(repo),
-        "--add-dir",
-        str(paths.root),
-    ]
+    command = ["claude"]
+    append_optional_cli_arg(command, "--model", model)
+    append_optional_cli_arg(command, "--effort", effort)
+    command.extend(["--add-dir", str(repo), "--add-dir", str(paths.root)])
+    return command
 
 
 def codex_child_command(
@@ -2090,7 +2093,7 @@ def resume_runtime(repo: Path, run_id: str | None = None) -> int:
     config = RunConfig(
         repo=root,
         request=str(state.get("request") or ""),
-        claude_model=str(models.get("claude") or "opus"),
+        claude_model=str(models.get("claude") or ""),
         claude_effort=str(models.get("claude_effort") or "medium"),
         codex_model=str(models.get("codex") or "gpt-5.3-codex"),
         codex_effort=str(models.get("codex_effort") or "medium"),
@@ -2483,7 +2486,7 @@ def interactive_default(cwd: Path) -> int:
     config = RunConfig(
         repo=cwd,
         request=request,
-        claude_model=os.environ.get("CCX_CLAUDE_MODEL", "opus"),
+        claude_model=os.environ.get("CCX_CLAUDE_MODEL", ""),
         claude_effort=os.environ.get("CCX_CLAUDE_EFFORT", "medium"),
         codex_model=os.environ.get("CCX_CODEX_MODEL", "gpt-5.3-codex"),
         codex_effort=os.environ.get("CCX_CODEX_EFFORT", "medium"),

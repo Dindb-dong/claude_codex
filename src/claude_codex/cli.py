@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1242,8 +1243,8 @@ def command_run(args: argparse.Namespace) -> int:
     config = RunConfig(
         repo=Path(args.repo).expanduser().resolve(),
         request=request,
-        claude_model=args.claude_model,
-        claude_effort=args.claude_effort,
+        claude_model=args.claude_model or os.environ.get("CCX_CLAUDE_MODEL", ""),
+        claude_effort=args.claude_effort or os.environ.get("CCX_CLAUDE_EFFORT", "medium"),
         codex_model=args.codex_model,
         codex_effort=args.codex_effort,
         requested_workers=args.workers,
@@ -1263,8 +1264,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="launch interactive cmux orchestration")
     run_parser.add_argument("request", nargs="*")
     run_parser.add_argument("--repo", default=".")
-    run_parser.add_argument("--claude-model", default="opus")
-    run_parser.add_argument("--claude-effort", default="medium")
+    run_parser.add_argument(
+        "--claude-model",
+        default="",
+        help="Claude model for planner/conductor; omit to use the Claude CLI default",
+    )
+    run_parser.add_argument("--claude-effort", default=None)
     run_parser.add_argument("--codex-model", default="gpt-5.3-codex")
     run_parser.add_argument("--codex-effort", default="medium")
     run_parser.add_argument("--workers", type=positive_int)
