@@ -81,7 +81,7 @@ cd /path/to/your-repo
 ccx
 ```
 
-Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, launches Codex worker panes in cmux, and starts the Claude conductor in the current `ccx` terminal.
+Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, overlays current uncommitted tracked changes and untracked source files from the starting repository, launches Codex worker panes in cmux, and starts the Claude conductor in the current `ccx` terminal.
 
 At the pre-launch prompt, type `/` to open a styled slash-command picker. Use arrow keys
 to move and Enter to select. The list includes Claude-native command references and ccx
@@ -133,6 +133,18 @@ Worker Codex panes are launched with `workspace-write`, the worker worktree as `
 the shared run state as `--add-dir`, and `--ask-for-approval never`. This keeps
 validation/question/handoff writes non-interactive while the sandbox still blocks writes
 outside the worktree and shared run state.
+
+Worker and integration worktrees are created with `git worktree add` first. Because
+plain git worktrees only contain committed `HEAD` files, ccx then overlays the
+starting repository's dirty tracked files and untracked non-ignored source files.
+Internal orchestration directories such as `.git`, `.ccx`, `.orchestrator`, and
+`.ccx-worktrees` are excluded from that overlay.
+
+If a worker cannot write a handoff into the shared run state because the Codex
+sandbox rejects the path, `ccx handoff` writes a worker-local fallback under
+`.ccx-local/runs/<run-id>/handoffs/`. `ccx status` and `ccx watch` count those
+fallback handoffs so the conductor does not mistake completed workers for still
+running workers.
 
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated prompts include interrupt recovery rules. The conductor may mark a stale interrupted run stopped with `ccx stop --run <run-id>`. Workers only check status and report back; they do not write global stop state from their sandbox. `ccx check-barrier` refuses stopped runs even if `approved.json` already exists.
 
@@ -191,6 +203,7 @@ export CCX_CODEX_EFFORT=medium
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - `ccx approve` should notify recorded worker panes; workers also wait on `ccx check-barrier`.
 - `ccx check-barrier` blocks stopped runs even when the approval file exists.
+- `ccx status` and `ccx watch` include worker-local handoff fallbacks.
 - Same-file edits by multiple workers require explicit Claude arbitration.
 - `Ctrl-C` in a launched pane and `ccx stop` mark state stopped by default. They close cmux panes only with `--close-cmux`.
 - `Esc` is recovered by prompt protocol on resume: the conductor stops stale `running` state only when recovering from an explicit user interrupt; workers report stopped state and wait.

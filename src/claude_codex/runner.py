@@ -36,7 +36,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in incomplete i
     Style = None  # type: ignore[assignment]
 
 from claude_codex.claude_commands import install_claude_commands
-from claude_codex.cli import CliError, StatePaths, ensure_state_dirs, write_text
+from claude_codex.cli import CliError, StatePaths, ensure_state_dirs, local_handoff_path, write_text
 from claude_codex.preflight import check_claude_auth, claude_auth_failure_message
 
 MAX_AUTO_WORKERS = 5
@@ -372,6 +372,87 @@ def ensure_git_exclude(repo: Path, patterns: list[str]) -> None:
                 handle.write("\n")
             for pattern in additions:
                 handle.write(f"{pattern}\n")
+
+
+SNAPSHOT_EXCLUDED_ROOTS = {".git", ".ccx", ".orchestrator", ".ccx-worktrees"}
+
+
+def should_copy_snapshot_path(relative_path: Path) -> bool:
+    """Return whether a source snapshot path should be copied to worker worktrees.
+
+    Args:
+        relative_path: Path relative to the source repository.
+    """
+    parts = relative_path.parts
+    return bool(parts) and parts[0] not in SNAPSHOT_EXCLUDED_ROOTS
+
+
+def snapshot_overlay_paths(repo: Path) -> set[Path]:
+    """Return tracked dirty and untracked source paths missing from plain git worktrees.
+
+    Args:
+        repo: Source repository path.
+    """
+    paths: set[Path] = set()
+    dirty_output = run_command(["git", "diff", "--name-only", "-z", "HEAD", "--"], cwd=repo)
+    untracked_output = run_command(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=repo,
+    )
+    for output in (dirty_output, untracked_output):
+        for raw_path in output.split("\0"):
+            if not raw_path:
+                continue
+            relative_path = Path(raw_path)
+            if should_copy_snapshot_path(relative_path):
+                paths.add(relative_path)
+    return paths
+
+
+def remove_path(path: Path) -> None:
+    """Remove a file, symlink, or directory if present.
+
+    Args:
+        path: Destination path to remove.
+    """
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def copy_snapshot_path(repo: Path, destination: Path, relative_path: Path) -> None:
+    """Copy one source snapshot path into a worktree, or remove it when deleted.
+
+    Args:
+        repo: Source repository path.
+        destination: Destination worktree path.
+        relative_path: Path relative to the source repository.
+    """
+    source_path = repo / relative_path
+    destination_path = destination / relative_path
+    if not source_path.exists() and not source_path.is_symlink():
+        remove_path(destination_path)
+        return
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    remove_path(destination_path)
+    if source_path.is_symlink():
+        destination_path.symlink_to(os.readlink(source_path))
+    elif source_path.is_dir():
+        shutil.copytree(source_path, destination_path, symlinks=True)
+    else:
+        shutil.copy2(source_path, destination_path)
+
+
+def overlay_current_source_snapshot(repo: Path, destination: Path) -> None:
+    """Overlay uncommitted tracked changes and untracked files onto a git worktree.
+
+    Args:
+        repo: Source repository path.
+        destination: Destination worktree path.
+    """
+    for relative_path in sorted(snapshot_overlay_paths(repo)):
+        copy_snapshot_path(repo, destination, relative_path)
 
 
 def ccx_root(repo: Path) -> Path:
@@ -857,12 +938,14 @@ def create_worktrees(repo: Path, run_id: str, plan: Plan, integration_worktree: 
         ],
         cwd=repo,
     )
+    overlay_current_source_snapshot(repo, integration_worktree)
     for task in plan.tasks:
         task.worktree.parent.mkdir(parents=True, exist_ok=True)
         run_command(
             ["git", "worktree", "add", "-b", task.branch, str(task.worktree), "HEAD"],
             cwd=repo,
         )
+        overlay_current_source_snapshot(repo, task.worktree)
 
 
 def interrupt_recovery_prompt(config: RunConfig, run_id: str, *, role: str) -> str:
@@ -946,7 +1029,8 @@ Hard workflow:
 5. `ccx approve` resumes recorded worker panes automatically. Do not assume workers
    will wake up from file creation alone.
 6. Review handoffs in {paths.handoffs} as they arrive. Prefer `{watch_command}`
-   or `{status_command}` over long background sleep polling.
+   or `{status_command}` over long background sleep polling. Status includes
+   worker-local handoff fallbacks if a worker cannot write to shared state.
 7. Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not
    combine commands with `&&`, pipes, command substitution, or shell scripts unless
    the user explicitly asks.
@@ -985,13 +1069,16 @@ These rules apply to every Codex worker in this run.
 5. Work only in your assigned worker worktree after approval.
 6. If uncertainty appears during implementation, pause only yourself and write a question.
 7. On completion, write a ccx handoff.
+   If ccx reports "wrote local handoff fallback", treat that as a successful
+   handoff and tell the conductor the fallback path.
 8. Do not merge or push.
 9. The Codex session is launched with this shared state directory as an additional
    writable root, so do not ask the user for approval just to write validation,
    question, approval-check, or handoff files under: {paths.root}
 10. Your Codex approval policy is non-interactive. Do not ask the user to approve
-    ccx validation/question/handoff writes; if a sandboxed command fails, report the
-    exact failure to the conductor and stop.
+    ccx validation/question/handoff writes. If ccx handoff writes a local fallback,
+    continue reporting completion. For any other sandboxed command failure, report
+    the exact failure to the conductor and stop.
 
 {interrupt_recovery_prompt(config, run_id, role="worker")}
 """
@@ -1579,11 +1666,33 @@ def exec_foreground_agent(
         raise CliError("zsh shell not found for foreground agent launch") from exc
 
 
-def runtime_counts(paths: StatePaths) -> dict[str, int]:
+def local_handoff_files(state: dict[str, Any]) -> list[Path]:
+    """Return worker-local handoff fallback files recorded under worker worktrees.
+
+    Args:
+        state: Runtime state payload.
+    """
+    run_id = str(state.get("run_id") or "")
+    files: list[Path] = []
+    for worker in state.get("workers", []):
+        if not isinstance(worker, dict):
+            continue
+        worker_id = str(worker.get("id") or "")
+        worktree = Path(str(worker.get("worktree") or ""))
+        if not worker_id or not worktree:
+            continue
+        path = local_handoff_path(worktree, run_id, worker_id)
+        if path.exists():
+            files.append(path)
+    return files
+
+
+def runtime_counts(paths: StatePaths, state: dict[str, Any] | None = None) -> dict[str, int]:
     """Count state files in the shared runtime directory.
 
     Args:
         paths: Shared orchestration paths.
+        state: Optional runtime state payload.
     """
     tasks = list(paths.tasks.glob("*.md")) if paths.tasks.exists() else []
     validations = list(paths.validations.glob("*.md")) if paths.validations.exists() else []
@@ -1596,12 +1705,17 @@ def runtime_counts(paths: StatePaths) -> dict[str, int]:
         list(paths.resolved_questions.glob("*.md")) if paths.resolved_questions.exists() else []
     )
     handoffs = list(paths.handoffs.glob("*.md")) if paths.handoffs.exists() else []
+    shared_handoff_ids = {path.stem for path in handoffs}
+    local_handoffs = local_handoff_files(state or {})
+    local_only_handoffs = [path for path in local_handoffs if path.stem not in shared_handoff_ids]
     return {
         "tasks": len(tasks),
         "validations": len(validations),
         "questions": len(questions),
         "resolved_questions": len(resolved),
-        "handoffs": len(handoffs),
+        "handoffs": len(shared_handoff_ids) + len(local_only_handoffs),
+        "shared_handoffs": len(shared_handoff_ids),
+        "local_handoffs": len(local_only_handoffs),
     }
 
 
@@ -1615,7 +1729,7 @@ def runtime_status(repo: Path, run_id: str | None = None) -> dict[str, Any]:
     root = git_root(repo)
     paths = resolve_state_paths(root, run_id)
     state = read_runtime_state(root, run_id)
-    counts = runtime_counts(paths)
+    counts = runtime_counts(paths, state)
     return {
         "repo": str(root),
         "state_dir": str(paths.root),
@@ -1675,6 +1789,8 @@ def format_runtime_status(status: dict[str, Any]) -> str:
             f"handoffs: {counts['handoffs']}/{counts['tasks']}",
         ]
     )
+    if counts.get("local_handoffs"):
+        lines.append(f"local handoff fallbacks: {counts['local_handoffs']}")
     return "\n".join(lines)
 
 

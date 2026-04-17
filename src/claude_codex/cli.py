@@ -17,6 +17,7 @@ from claude_codex.preflight import check_claude_auth
 
 STATE_DIR_NAME = ".orchestrator"
 CCX_DIR_NAME = ".ccx"
+LOCAL_CCX_DIR_NAME = ".ccx-local"
 RUNS_DIR_NAME = "runs"
 CURRENT_RUN_FILE = "current-run"
 RECOMMENDATIONS = {"approve", "revise", "reject"}
@@ -320,6 +321,33 @@ def next_question_path(paths: StatePaths, worker_id: str) -> Path:
     existing = sorted(paths.questions.glob(f"{worker_id}-*.md"))
     next_number = len(existing) + 1
     return paths.questions / f"{worker_id}-{next_number:03d}.md"
+
+
+def local_run_id(run_id: str) -> str:
+    """Return a stable local fallback run id.
+
+    Args:
+        run_id: Shared ccx run id, when available.
+    """
+    return run_id or "legacy"
+
+
+def local_handoff_path(worktree: Path, run_id: str, worker_id: str) -> Path:
+    """Return the worker-local handoff fallback path.
+
+    Args:
+        worktree: Worker worktree path.
+        run_id: Shared ccx run id.
+        worker_id: Worker identifier.
+    """
+    return (
+        worktree
+        / LOCAL_CCX_DIR_NAME
+        / RUNS_DIR_NAME
+        / local_run_id(run_id)
+        / "handoffs"
+        / f"{worker_id}.md"
+    )
 
 
 def resolve_question_name(question_name: str) -> str:
@@ -933,6 +961,7 @@ def command_handoff(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.target_repo)
     paths = existing_command_state_paths(repo, args.run)
     ensure_state_dirs(paths)
+    run_id = command_run_id(repo, args.run, paths)
     handoff_file = paths.handoffs / f"{args.worker_id}.md"
     content = f"""# Worker Handoff
 
@@ -966,8 +995,14 @@ def command_handoff(args: argparse.Namespace) -> int:
 
 {args.integration_notes}
 """
-    write_text(handoff_file, content, force=args.force)
-    print(f"wrote handoff: {handoff_file}")
+    try:
+        write_text(handoff_file, content, force=args.force)
+        print(f"wrote handoff: {handoff_file}")
+    except PermissionError as exc:
+        fallback_file = local_handoff_path(Path.cwd(), run_id, args.worker_id)
+        write_text(fallback_file, content, force=True)
+        print(f"warning: shared handoff write failed: {exc}", file=sys.stderr)
+        print(f"wrote local handoff fallback: {fallback_file}")
     return 0
 
 

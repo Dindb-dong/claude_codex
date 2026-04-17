@@ -381,6 +381,50 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Implemented task.", handoff_file.read_text(encoding="utf-8"))
 
+    def test_handoff_writes_local_fallback_when_shared_state_is_blocked(self) -> None:
+        """handoff falls back to the worker worktree when shared state is not writable."""
+        run_id = "20260417000000000000-fallback"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "handoffs").mkdir(parents=True)
+        worker_worktree = self.repo / "worker-01"
+        worker_worktree.mkdir()
+
+        def fake_write_text(path: Path, content: str, *, force: bool = False) -> None:
+            if (
+                path.name == "worker-01.md"
+                and path.parent.name == "handoffs"
+                and path.parent.parent.name == run_id
+                and ".ccx" in path.parts
+            ):
+                raise PermissionError("sandbox denied shared state")
+            if path.exists() and not force:
+                raise AssertionError(f"unexpected overwrite refusal path: {path}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        with (
+            patch("claude_codex.cli.write_text", side_effect=fake_write_text),
+            patch("claude_codex.cli.Path.cwd", return_value=worker_worktree),
+        ):
+            exit_code = self.run_cli(
+                "handoff",
+                str(self.repo),
+                "worker-01",
+                "--run",
+                run_id,
+                "--branch",
+                "worker/demo",
+                "--worktree",
+                str(worker_worktree),
+                "--summary",
+                "Implemented task.",
+            )
+
+        fallback_file = worker_worktree / ".ccx-local/runs" / run_id / "handoffs/worker-01.md"
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((run_root / "handoffs/worker-01.md").exists())
+        self.assertIn("Implemented task.", fallback_file.read_text(encoding="utf-8"))
+
     def test_run_dry_run_uses_claude_plan_without_side_effects(self) -> None:
         """run --dry-run asks for a plan but skips state, worktree, and cmux side effects."""
         plan = {
@@ -652,6 +696,59 @@ class CliTestCase(unittest.TestCase):
         self.assertFalse(conductor.called)
         self.assertFalse(new_workspace_launcher.called)
 
+    def test_create_worktrees_overlay_source_snapshot(self) -> None:
+        """worker worktrees include uncommitted tracked changes and untracked files."""
+        from claude_codex.runner import Plan, WorkerTask, create_worktrees
+
+        (self.repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "test: add tracked file"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (self.repo / "tracked.txt").write_text("dirty working tree\n", encoding="utf-8")
+        (self.repo / "benchmark_matmul.cpp").write_text(
+            "int main() { return 0; }\n", encoding="utf-8"
+        )
+        (self.repo / "README.md").unlink()
+        (self.repo / ".ccx/runs/demo").mkdir(parents=True)
+        (self.repo / ".ccx/runs/demo/state.json").write_text("{}\n", encoding="utf-8")
+
+        worktree_root = Path(self.temp_dir.name) / "worktrees"
+        integration_worktree = worktree_root / "integration"
+        worker_worktree = worktree_root / "worker-01"
+        plan = Plan(
+            summary="Port benchmark.",
+            worker_count=1,
+            tasks=[
+                WorkerTask(
+                    worker_id="worker-01",
+                    title="Java port",
+                    objective="Implement BenchmarkMatMul.java.",
+                    owned_scope=["BenchmarkMatMul.java"],
+                    non_goals=[],
+                    required_tests=[],
+                    risks=[],
+                    branch="ccx/test-overlay/worker-01",
+                    worktree=worker_worktree,
+                )
+            ],
+        )
+
+        create_worktrees(self.repo, "test-overlay", plan, integration_worktree)
+
+        self.assertEqual(
+            (worker_worktree / "tracked.txt").read_text(encoding="utf-8"),
+            "dirty working tree\n",
+        )
+        self.assertTrue((worker_worktree / "benchmark_matmul.cpp").exists())
+        self.assertFalse((worker_worktree / "README.md").exists())
+        self.assertFalse((worker_worktree / ".ccx").exists())
+        self.assertTrue((integration_worktree / "benchmark_matmul.cpp").exists())
+
     def test_current_workspace_worker_launcher_does_not_create_workspace(self) -> None:
         """Claude-first worker launch adds panes to the current cmux workspace."""
         from claude_codex.runner import (
@@ -789,6 +886,41 @@ class CliTestCase(unittest.TestCase):
 
         self.assertEqual(status["status"], "not-started")
         self.assertEqual(status["state_dir"], str(self.repo.resolve() / ".ccx/runs"))
+
+    def test_status_counts_worker_local_handoff_fallbacks(self) -> None:
+        """runtime status includes handoffs written under worker-local fallback state."""
+        from claude_codex.runner import runtime_status
+
+        run_id = "20260417000000000000-local-handoff"
+        run_root = self.repo / ".ccx/runs" / run_id
+        worker_worktree = self.repo / "worker-01"
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "handoffs").mkdir()
+        worker_worktree.mkdir()
+        (run_root / "tasks/worker-01.md").write_text("# Worker Task\n", encoding="utf-8")
+        (run_root / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "workers": [
+                        {
+                            "id": "worker-01",
+                            "worktree": str(worker_worktree),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        fallback_file = worker_worktree / ".ccx-local/runs" / run_id / "handoffs/worker-01.md"
+        fallback_file.parent.mkdir(parents=True)
+        fallback_file.write_text("# Worker Handoff\n", encoding="utf-8")
+
+        status = runtime_status(self.repo, run_id)
+
+        self.assertEqual(status["counts"]["handoffs"], 1)
+        self.assertEqual(status["counts"]["local_handoffs"], 1)
 
     def test_agent_command_wraps_child_with_prompt(self) -> None:
         """agent runs a child command with the prompt appended."""
