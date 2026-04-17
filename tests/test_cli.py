@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from claude_codex.cli import main
 from claude_codex.preflight import ClaudeAuthCheck
+from claude_codex.runner import installed_worker_hard_rules_path
 
 
 def authenticated_claude_check() -> ClaudeAuthCheck:
@@ -616,14 +617,19 @@ class CliTestCase(unittest.TestCase):
         self.assertFalse((self.repo / ".orchestrator").exists())
         conductor_prompt = (run_dirs[0] / "prompts/claude-conductor.md").read_text(encoding="utf-8")
         worker_prompt = (run_dirs[0] / "prompts/worker-01.md").read_text(encoding="utf-8")
-        hard_rules_prompt = (run_dirs[0] / "prompts/hard_rules.md").read_text(encoding="utf-8")
+        installed_hard_rules_path = installed_worker_hard_rules_path()
+        hard_rules_prompt = installed_hard_rules_path.read_text(encoding="utf-8")
+        self.assertFalse((run_dirs[0] / "prompts/hard_rules.md").exists())
         resolved_repo = self.repo.resolve()
         self.assertIn("Esc may interrupt Claude/Codex without notifying ccx", conductor_prompt)
         self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
-        self.assertIn("@", worker_prompt)
-        self.assertIn("hard_rules.md", worker_prompt)
+        self.assertIn(str(installed_hard_rules_path), worker_prompt)
+        self.assertIn("Do not use `@file`", worker_prompt)
+        self.assertNotIn(f"@{installed_hard_rules_path}", worker_prompt)
         self.assertNotIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
-        self.assertIn("Do not run `ccx stop` from a worker sandbox", hard_rules_prompt)
+        self.assertIn("ccx-worker-protocol/v1", hard_rules_prompt)
+        self.assertIn("Do not merge, push, or run `ccx stop`", hard_rules_prompt)
+        self.assertLess(len(hard_rules_prompt.split()), 140)
         self.assertIn(f"until ccx check-barrier {resolved_repo} --run {current_run}", worker_prompt)
 
     def test_run_no_conductor_launches_workers_without_nested_claude(self) -> None:

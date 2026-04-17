@@ -19,6 +19,9 @@ ccx = "claude_codex.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+claude_codex = ["prompts/*.md"]
+
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
