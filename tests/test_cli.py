@@ -455,6 +455,147 @@ class CliTestCase(unittest.TestCase):
         self.assertFalse((run_root / "handoffs/worker-01.md").exists())
         self.assertIn("Implemented task.", fallback_file.read_text(encoding="utf-8"))
 
+    def test_integrate_merges_handed_off_worker_branch(self) -> None:
+        """integrate merges a completed worker branch into the integration worktree."""
+        run_id = "20260418000000000000-integrate"
+        run_root = self.repo / ".ccx/runs" / run_id
+        integration_worktree = Path(self.temp_dir.name) / "worktrees" / "integration"
+        current_branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            [
+                "git",
+                "worktree",
+                "add",
+                "-b",
+                f"ccx/{run_id}/integration",
+                str(integration_worktree),
+                "HEAD",
+            ],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "-b", f"ccx/{run_id}/worker-01"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (self.repo / "feature.txt").write_text("worker output\n", encoding="utf-8")
+        subprocess.run(["git", "add", "feature.txt"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "test: worker output"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "checkout", current_branch],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        (self.repo / ".ccx").mkdir(exist_ok=True)
+        (self.repo / ".ccx/current-run").write_text(run_id + "\n", encoding="utf-8")
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "handoffs").mkdir()
+        (run_root / "approvals").mkdir()
+        (run_root / "tasks/worker-01.md").write_text(
+            f"""# Worker Task
+
+## Worker
+
+- ID: worker-01
+- Branch: ccx/{run_id}/worker-01
+- Worktree: /tmp/worker-01
+""",
+            encoding="utf-8",
+        )
+        (run_root / "handoffs/worker-01.md").write_text(
+            f"""# Worker Handoff
+
+## Worker
+
+- ID: worker-01
+- Branch: ccx/{run_id}/worker-01
+- Worktree: /tmp/worker-01
+
+## Summary
+
+Implemented worker output.
+""",
+            encoding="utf-8",
+        )
+        (run_root / "approvals/approved.json").write_text('{"approved": true}\n', encoding="utf-8")
+        (run_root / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "integration": {
+                        "branch": f"ccx/{run_id}/integration",
+                        "worktree": str(integration_worktree),
+                    },
+                    "workers": [
+                        {
+                            "id": "worker-01",
+                            "branch": f"ccx/{run_id}/worker-01",
+                            "worktree": "/tmp/worker-01",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = self.run_cli("integrate", str(self.repo), "--run", run_id)
+
+        state = json.loads((run_root / "run-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((integration_worktree / "feature.txt").exists())
+        self.assertEqual(state["integration"]["status"], "integrated")
+        self.assertEqual(state["integration"]["merged_workers"], ["worker-01"])
+        self.assertTrue(Path(state["integration"]["last_report"]).exists())
+
+    def test_integrate_requires_handoffs(self) -> None:
+        """integrate refuses to run before all requested worker handoffs exist."""
+        run_id = "20260418000000000000-missing-handoff"
+        run_root = self.repo / ".ccx/runs" / run_id
+        integration_worktree = Path(self.temp_dir.name) / "worktrees" / "integration"
+        (self.repo / ".ccx").mkdir(exist_ok=True)
+        (self.repo / ".ccx/current-run").write_text(run_id + "\n", encoding="utf-8")
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "approvals").mkdir()
+        (run_root / "tasks/worker-01.md").write_text("# Worker Task\n", encoding="utf-8")
+        (run_root / "approvals/approved.json").write_text('{"approved": true}\n', encoding="utf-8")
+        (run_root / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "integration": {"worktree": str(integration_worktree)},
+                    "workers": [{"id": "worker-01", "branch": "worker-01"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        exit_code = self.run_cli("integrate", str(self.repo), "--run", run_id)
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse((run_root / "integration").exists())
+
     def test_question_writes_local_fallback_when_shared_state_is_blocked(self) -> None:
         """question falls back to the worker worktree when shared state is not writable."""
         run_id = "20260417000000000000-question-fallback"
@@ -613,6 +754,7 @@ class CliTestCase(unittest.TestCase):
         self.assertIn("/usage", output)
         self.assertIn("/status", output)
         self.assertIn("status(ccx)", output)
+        self.assertIn("integrate(ccx)", output)
 
     def test_slash_usage_is_claude_reference(self) -> None:
         """usage is treated as a Claude-native reference, not an unknown command."""
@@ -1189,15 +1331,19 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         command_file = fake_home / ".claude/commands/ccx-status.md"
         run_command_file = fake_home / ".claude/commands/ccx-run.md"
+        integrate_command_file = fake_home / ".claude/commands/ccx-integrate.md"
         self.assertTrue(command_file.exists())
         self.assertTrue(run_command_file.exists())
+        self.assertTrue(integrate_command_file.exists())
         status_content = command_file.read_text(encoding="utf-8")
         run_content = run_command_file.read_text(encoding="utf-8")
+        integrate_content = integrate_command_file.read_text(encoding="utf-8")
         self.assertIn("status(ccx)", status_content)
         self.assertIn("Bash(ccx:*)", status_content)
         self.assertIn("Bash(cmux read-screen:*)", run_content)
         self.assertIn("ccx run --no-conductor", run_content)
         self.assertIn("Do not chain", run_content)
+        self.assertIn("ccx integrate", integrate_content)
 
     def test_doctor_runs(self) -> None:
         """doctor returns a process status after checking external commands."""

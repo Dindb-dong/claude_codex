@@ -72,6 +72,15 @@ Worker-local fallbacks are written inside the worker worktree when Codex sandbox
 
 `ccx status`, `ccx watch`, and `ccx approve` count worker-local fallback questions. `ccx status` and `ccx watch` also count worker-local fallback handoffs.
 
+Integration reports are written under:
+
+```text
+.ccx/runs/<run-id>/integration/
+```
+
+`ccx integrate` merges handed-off worker branches into the integration worktree
+and records success or the failed worker in the run state.
+
 ## Barrier Contract
 
 Workers may inspect files and write validation before approval. Workers may not edit code until both are true:

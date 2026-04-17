@@ -163,7 +163,18 @@ If Codex sandboxing blocks the shared handoff file, `ccx handoff` writes a worke
 
 ## Phase 7: Integration
 
-Claude integrates worker branches into the integration worktree.
+Claude integrates worker branches into the integration worktree with:
+
+```bash
+ccx integrate <repo> --run <run-id>
+```
+
+`ccx integrate` requires resolved questions, an approval barrier, worker handoffs,
+and a clean integration worktree. It writes a JSON report under:
+
+```text
+.ccx/runs/<run-id>/integration/
+```
 
 Recommended order:
 

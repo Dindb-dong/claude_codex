@@ -396,6 +396,212 @@ def resolve_question_name(question_name: str) -> str:
     return name
 
 
+def markdown_metadata_value(content: str, label: str) -> str:
+    """Return a markdown metadata value such as ``- Branch: ...``.
+
+    Args:
+        content: Markdown content to inspect.
+        label: Metadata label without the leading dash.
+    """
+    prefix = f"- {label}:"
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if line.startswith(prefix):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def handoff_metadata(handoff_file: Path) -> dict[str, str]:
+    """Parse the worker, branch, and worktree fields from a handoff.
+
+    Args:
+        handoff_file: Handoff markdown file.
+    """
+    content = handoff_file.read_text(encoding="utf-8")
+    return {
+        "worker_id": markdown_metadata_value(content, "ID") or handoff_file.stem,
+        "branch": markdown_metadata_value(content, "Branch"),
+        "worktree": markdown_metadata_value(content, "Worktree"),
+    }
+
+
+def worker_state_by_id(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return runtime worker metadata keyed by worker id.
+
+    Args:
+        state: Runtime state payload.
+    """
+    workers: dict[str, dict[str, Any]] = {}
+    for worker in state.get("workers", []):
+        if not isinstance(worker, dict):
+            continue
+        worker_id = str(worker.get("id") or "")
+        if worker_id:
+            workers[worker_id] = worker
+    return workers
+
+
+def handoff_file_for_worker(
+    paths: StatePaths, state: dict[str, Any], worker_id: str
+) -> Path | None:
+    """Return the shared or local handoff file for a worker.
+
+    Args:
+        paths: Resolved orchestration paths.
+        state: Runtime state payload.
+        worker_id: Worker identifier.
+    """
+    shared = paths.handoffs / f"{worker_id}.md"
+    if shared.exists():
+        return shared
+    workers = worker_state_by_id(state)
+    worker = workers.get(worker_id, {})
+    worktree = Path(str(worker.get("worktree") or ""))
+    run_id = str(state.get("run_id") or "")
+    if worktree and run_id:
+        local = local_handoff_path(worktree, run_id, worker_id)
+        if local.exists():
+            return local
+    return None
+
+
+def git_output(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run a git command and capture text output.
+
+    Args:
+        command: Git arguments including the executable.
+        cwd: Working directory.
+    """
+    return subprocess.run(command, cwd=cwd, check=False, capture_output=True, text=True)
+
+
+def require_clean_git_worktree(worktree: Path) -> None:
+    """Require the integration worktree to have no pending changes.
+
+    Args:
+        worktree: Integration git worktree path.
+    """
+    status = git_output(["git", "status", "--porcelain"], worktree)
+    if status.returncode != 0:
+        detail = (status.stderr or status.stdout or "").strip()
+        raise CliError(f"failed to inspect integration worktree: {detail}")
+    if status.stdout.strip():
+        raise CliError(f"integration worktree has uncommitted changes: {worktree}")
+
+
+def write_integration_report(paths: StatePaths, report: dict[str, Any]) -> Path:
+    """Write an integration report under the run state directory.
+
+    Args:
+        paths: Resolved orchestration paths.
+        report: Report payload.
+    """
+    timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+    report_path = paths.root / "integration" / f"{timestamp}.json"
+    write_text(report_path, json.dumps(report, indent=2, sort_keys=True) + "\n", force=True)
+    return report_path
+
+
+def command_integrate(args: argparse.Namespace) -> int:
+    """Merge worker branches into the integration worktree.
+
+    Args:
+        args: Parsed CLI arguments.
+    """
+    repo = resolve_repo(args.target_repo)
+    paths = existing_command_state_paths(repo, args.run)
+    state = read_runtime_state(paths)
+    run_id = command_run_id(repo, args.run, paths)
+    status = build_status(paths, state)
+    if state.get("status") == "stopped" and not args.force:
+        raise CliError("run is stopped; resume it first or pass --force")
+    if status["questions"] and not args.force:
+        raise CliError("open questions exist; resolve them or pass --force")
+    if not paths.approval_file.exists() and not args.force:
+        raise CliError("approval barrier is missing; approve the run before integration")
+
+    worker_ids = args.worker or status["workers"]
+    if not worker_ids:
+        raise CliError("no worker tasks found")
+
+    missing_handoffs = [
+        worker_id
+        for worker_id in worker_ids
+        if handoff_file_for_worker(paths, state, worker_id) is None
+    ]
+    if missing_handoffs and not args.force:
+        raise CliError(f"missing handoffs: {', '.join(missing_handoffs)}")
+
+    integration = state.get("integration", {})
+    if not isinstance(integration, dict):
+        integration = {}
+    integration_worktree = Path(str(integration.get("worktree") or ""))
+    if not integration_worktree:
+        raise CliError("run-state.json does not record an integration worktree")
+    if not integration_worktree.exists():
+        raise CliError(f"integration worktree does not exist: {integration_worktree}")
+    if not args.dry_run and not args.allow_dirty:
+        require_clean_git_worktree(integration_worktree)
+
+    worker_state = worker_state_by_id(state)
+    report: dict[str, Any] = {
+        "run_id": run_id,
+        "started_at": datetime.now(UTC).isoformat(),
+        "integration_worktree": str(integration_worktree),
+        "status": "dry-run" if args.dry_run else "running",
+        "workers": [],
+    }
+
+    for worker_id in worker_ids:
+        handoff_file = handoff_file_for_worker(paths, state, worker_id)
+        metadata = handoff_metadata(handoff_file) if handoff_file is not None else {}
+        branch = str(metadata.get("branch") or worker_state.get(worker_id, {}).get("branch") or "")
+        if not branch:
+            raise CliError(f"missing branch for {worker_id}")
+        worker_report = {
+            "id": worker_id,
+            "branch": branch,
+            "handoff": str(handoff_file) if handoff_file is not None else "",
+            "result": "planned" if args.dry_run else "pending",
+        }
+        report["workers"].append(worker_report)
+        if args.dry_run:
+            print(f"would merge {worker_id}: {branch}")
+            continue
+        print(f"merging {worker_id}: {branch}")
+        merge = git_output(["git", "merge", "--no-ff", "--no-edit", branch], integration_worktree)
+        worker_report["stdout"] = merge.stdout.strip()
+        worker_report["stderr"] = merge.stderr.strip()
+        worker_report["returncode"] = merge.returncode
+        if merge.returncode != 0:
+            worker_report["result"] = "failed"
+            report["status"] = "failed"
+            report["failed_worker"] = worker_id
+            report["finished_at"] = datetime.now(UTC).isoformat()
+            report_path = write_integration_report(paths, report)
+            integration["status"] = "failed"
+            integration["last_report"] = str(report_path)
+            integration["failed_worker"] = worker_id
+            state["integration"] = integration
+            write_runtime_state(paths, state)
+            print(f"integration failed for {worker_id}; report: {report_path}", file=sys.stderr)
+            return 1
+        worker_report["result"] = "merged"
+
+    report["status"] = "integrated" if not args.dry_run else "dry-run"
+    report["finished_at"] = datetime.now(UTC).isoformat()
+    report_path = write_integration_report(paths, report)
+    if not args.dry_run:
+        integration["status"] = "integrated"
+        integration["last_integrated_at"] = report["finished_at"]
+        integration["last_report"] = str(report_path)
+        integration["merged_workers"] = worker_ids
+        state["integration"] = integration
+        write_runtime_state(paths, state)
+    print(f"integration report: {report_path}")
+    return 0
+
+
 def build_status(paths: StatePaths, state: dict[str, Any] | None = None) -> dict[str, Any]:
     """Build a machine-readable orchestration status object.
 
@@ -1146,6 +1352,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="ignore questions/missing validations",
     )
     approve_parser.set_defaults(func=command_approve)
+
+    integrate_parser = subparsers.add_parser(
+        "integrate",
+        help="merge worker branches into the integration worktree",
+    )
+    integrate_parser.add_argument("target_repo", nargs="?", default=".")
+    integrate_parser.add_argument("--run", help="select a specific run id")
+    integrate_parser.add_argument(
+        "--worker",
+        action="append",
+        type=validate_worker_id,
+        help="integrate a specific worker; may be passed multiple times",
+    )
+    integrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print planned merges and write a report without running git merge",
+    )
+    integrate_parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="allow merging into a dirty integration worktree",
+    )
+    integrate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="ignore missing approval, open questions, stopped state, or missing handoffs",
+    )
+    integrate_parser.set_defaults(func=command_integrate)
 
     question_parser = subparsers.add_parser("question", help="write a worker question")
     question_parser.add_argument("target_repo")
