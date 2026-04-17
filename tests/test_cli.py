@@ -210,7 +210,85 @@ class CliTestCase(unittest.TestCase):
         send_command = next(command for command in calls if command[:2] == ["cmux", "send"])
         self.assertIn("workspace:1", send_command)
         self.assertIn("surface:9", send_command)
-        self.assertIn("ccx approval received", " ".join(send_command))
+        self.assertIn("Approval ready", " ".join(send_command))
+        self.assertNotIn("check-barrier", " ".join(send_command))
+
+    def test_check_barrier_refuses_stopped_run(self) -> None:
+        """check-barrier blocks implementation when the run is stopped."""
+        run_id = "20260416000000000000-stopped"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "approvals").mkdir(parents=True)
+        (run_root / "approvals/approved.json").write_text('{"approved": true}\n', encoding="utf-8")
+        (run_root / "run-state.json").write_text(
+            json.dumps({"run_id": run_id, "status": "stopped"}),
+            encoding="utf-8",
+        )
+
+        exit_code = self.run_cli("check-barrier", str(self.repo), "--run", run_id)
+
+        self.assertEqual(exit_code, 1)
+
+    def test_validation_notifies_conductor_when_all_workers_approve(self) -> None:
+        """The final approve validation nudges the recorded conductor pane."""
+        run_id = "20260416000000000000-ready"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "validations").mkdir()
+        for worker_id in ("worker-01", "worker-02"):
+            (run_root / f"tasks/{worker_id}.md").write_text(
+                f"""# Worker Task
+
+## Worker
+
+- ID: {worker_id}
+- Branch: ccx/demo/{worker_id}
+- Worktree: /tmp/{worker_id}
+""",
+                encoding="utf-8",
+            )
+        (run_root / "validations/worker-01.md").write_text(
+            "# Worker Validation\n\n## Recommendation\n\nApprove\n",
+            encoding="utf-8",
+        )
+        (run_root / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "conductor": {
+                        "workspace": "workspace:7",
+                        "surface": "surface:3",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("claude_codex.cli.subprocess.run", side_effect=fake_run):
+            exit_code = self.run_cli(
+                "validation",
+                str(self.repo),
+                "worker-02",
+                "--run",
+                run_id,
+                "--scope-coherence",
+                "Scope is coherent.",
+                "--overlap-check",
+                "No overlap found.",
+                "--recommendation",
+                "approve",
+            )
+
+        self.assertEqual(exit_code, 0)
+        send_command = next(command for command in calls if command[:2] == ["cmux", "send"])
+        self.assertIn("workspace:7", send_command)
+        self.assertIn("surface:3", send_command)
+        self.assertIn("ccx approve", " ".join(send_command))
 
     def test_open_question_blocks_approval(self) -> None:
         """approve refuses to proceed when unresolved questions exist."""
@@ -302,6 +380,50 @@ class CliTestCase(unittest.TestCase):
         handoff_file = self.repo / ".orchestrator/handoffs/worker-01.md"
         self.assertEqual(exit_code, 0)
         self.assertIn("Implemented task.", handoff_file.read_text(encoding="utf-8"))
+
+    def test_handoff_writes_local_fallback_when_shared_state_is_blocked(self) -> None:
+        """handoff falls back to the worker worktree when shared state is not writable."""
+        run_id = "20260417000000000000-fallback"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "handoffs").mkdir(parents=True)
+        worker_worktree = self.repo / "worker-01"
+        worker_worktree.mkdir()
+
+        def fake_write_text(path: Path, content: str, *, force: bool = False) -> None:
+            if (
+                path.name == "worker-01.md"
+                and path.parent.name == "handoffs"
+                and path.parent.parent.name == run_id
+                and ".ccx" in path.parts
+            ):
+                raise PermissionError("sandbox denied shared state")
+            if path.exists() and not force:
+                raise AssertionError(f"unexpected overwrite refusal path: {path}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        with (
+            patch("claude_codex.cli.write_text", side_effect=fake_write_text),
+            patch("claude_codex.cli.Path.cwd", return_value=worker_worktree),
+        ):
+            exit_code = self.run_cli(
+                "handoff",
+                str(self.repo),
+                "worker-01",
+                "--run",
+                run_id,
+                "--branch",
+                "worker/demo",
+                "--worktree",
+                str(worker_worktree),
+                "--summary",
+                "Implemented task.",
+            )
+
+        fallback_file = worker_worktree / ".ccx-local/runs" / run_id / "handoffs/worker-01.md"
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((run_root / "handoffs/worker-01.md").exists())
+        self.assertIn("Implemented task.", fallback_file.read_text(encoding="utf-8"))
 
     def test_run_dry_run_uses_claude_plan_without_side_effects(self) -> None:
         """run --dry-run asks for a plan but skips state, worktree, and cmux side effects."""
@@ -494,10 +616,14 @@ class CliTestCase(unittest.TestCase):
         self.assertFalse((self.repo / ".orchestrator").exists())
         conductor_prompt = (run_dirs[0] / "prompts/claude-conductor.md").read_text(encoding="utf-8")
         worker_prompt = (run_dirs[0] / "prompts/worker-01.md").read_text(encoding="utf-8")
+        hard_rules_prompt = (run_dirs[0] / "prompts/hard_rules.md").read_text(encoding="utf-8")
         resolved_repo = self.repo.resolve()
         self.assertIn("Esc may interrupt Claude/Codex without notifying ccx", conductor_prompt)
         self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
-        self.assertIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
+        self.assertIn("@", worker_prompt)
+        self.assertIn("hard_rules.md", worker_prompt)
+        self.assertNotIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
+        self.assertIn("Do not run `ccx stop` from a worker sandbox", hard_rules_prompt)
         self.assertIn(f"until ccx check-barrier {resolved_repo} --run {current_run}", worker_prompt)
 
     def test_run_no_conductor_launches_workers_without_nested_claude(self) -> None:
@@ -520,6 +646,13 @@ class CliTestCase(unittest.TestCase):
         }
 
         with (
+            patch.dict(
+                os.environ,
+                {
+                    "CMUX_WORKSPACE_ID": "workspace:conductor",
+                    "CMUX_SURFACE_ID": "surface:conductor",
+                },
+            ),
             patch(
                 "claude_codex.runner.check_claude_auth", return_value=authenticated_claude_check()
             ),
@@ -557,9 +690,64 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(run_state["status"], "running")
         self.assertEqual(run_state["cmux_workspace"], "workspace:1")
+        self.assertEqual(run_state["conductor"]["workspace"], "workspace:conductor")
+        self.assertEqual(run_state["conductor"]["surface"], "surface:conductor")
         self.assertEqual(run_state["workers"][0]["surface"], "surface:1")
         self.assertFalse(conductor.called)
         self.assertFalse(new_workspace_launcher.called)
+
+    def test_create_worktrees_overlay_source_snapshot(self) -> None:
+        """worker worktrees include uncommitted tracked changes and untracked files."""
+        from claude_codex.runner import Plan, WorkerTask, create_worktrees
+
+        (self.repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "test: add tracked file"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (self.repo / "tracked.txt").write_text("dirty working tree\n", encoding="utf-8")
+        (self.repo / "benchmark_matmul.cpp").write_text(
+            "int main() { return 0; }\n", encoding="utf-8"
+        )
+        (self.repo / "README.md").unlink()
+        (self.repo / ".ccx/runs/demo").mkdir(parents=True)
+        (self.repo / ".ccx/runs/demo/state.json").write_text("{}\n", encoding="utf-8")
+
+        worktree_root = Path(self.temp_dir.name) / "worktrees"
+        integration_worktree = worktree_root / "integration"
+        worker_worktree = worktree_root / "worker-01"
+        plan = Plan(
+            summary="Port benchmark.",
+            worker_count=1,
+            tasks=[
+                WorkerTask(
+                    worker_id="worker-01",
+                    title="Java port",
+                    objective="Implement BenchmarkMatMul.java.",
+                    owned_scope=["BenchmarkMatMul.java"],
+                    non_goals=[],
+                    required_tests=[],
+                    risks=[],
+                    branch="ccx/test-overlay/worker-01",
+                    worktree=worker_worktree,
+                )
+            ],
+        )
+
+        create_worktrees(self.repo, "test-overlay", plan, integration_worktree)
+
+        self.assertEqual(
+            (worker_worktree / "tracked.txt").read_text(encoding="utf-8"),
+            "dirty working tree\n",
+        )
+        self.assertTrue((worker_worktree / "benchmark_matmul.cpp").exists())
+        self.assertFalse((worker_worktree / "README.md").exists())
+        self.assertFalse((worker_worktree / ".ccx").exists())
+        self.assertTrue((integration_worktree / "benchmark_matmul.cpp").exists())
 
     def test_current_workspace_worker_launcher_does_not_create_workspace(self) -> None:
         """Claude-first worker launch adds panes to the current cmux workspace."""
@@ -699,6 +887,41 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(status["status"], "not-started")
         self.assertEqual(status["state_dir"], str(self.repo.resolve() / ".ccx/runs"))
 
+    def test_status_counts_worker_local_handoff_fallbacks(self) -> None:
+        """runtime status includes handoffs written under worker-local fallback state."""
+        from claude_codex.runner import runtime_status
+
+        run_id = "20260417000000000000-local-handoff"
+        run_root = self.repo / ".ccx/runs" / run_id
+        worker_worktree = self.repo / "worker-01"
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "handoffs").mkdir()
+        worker_worktree.mkdir()
+        (run_root / "tasks/worker-01.md").write_text("# Worker Task\n", encoding="utf-8")
+        (run_root / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "workers": [
+                        {
+                            "id": "worker-01",
+                            "worktree": str(worker_worktree),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        fallback_file = worker_worktree / ".ccx-local/runs" / run_id / "handoffs/worker-01.md"
+        fallback_file.parent.mkdir(parents=True)
+        fallback_file.write_text("# Worker Handoff\n", encoding="utf-8")
+
+        status = runtime_status(self.repo, run_id)
+
+        self.assertEqual(status["counts"]["handoffs"], 1)
+        self.assertEqual(status["counts"]["local_handoffs"], 1)
+
     def test_agent_command_wraps_child_with_prompt(self) -> None:
         """agent runs a child command with the prompt appended."""
         prompt_path = self.repo / "prompt.md"
@@ -808,8 +1031,13 @@ class CliTestCase(unittest.TestCase):
         run_command_file = fake_home / ".claude/commands/ccx-run.md"
         self.assertTrue(command_file.exists())
         self.assertTrue(run_command_file.exists())
-        self.assertIn("status(ccx)", command_file.read_text(encoding="utf-8"))
-        self.assertIn("ccx run --no-conductor", run_command_file.read_text(encoding="utf-8"))
+        status_content = command_file.read_text(encoding="utf-8")
+        run_content = run_command_file.read_text(encoding="utf-8")
+        self.assertIn("status(ccx)", status_content)
+        self.assertIn("Bash(ccx:*)", status_content)
+        self.assertIn("Bash(cmux read-screen:*)", run_content)
+        self.assertIn("ccx run --no-conductor", run_content)
+        self.assertIn("Do not chain", run_content)
 
     def test_doctor_runs(self) -> None:
         """doctor returns a process status after checking external commands."""

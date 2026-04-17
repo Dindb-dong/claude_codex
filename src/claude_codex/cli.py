@@ -17,6 +17,7 @@ from claude_codex.preflight import check_claude_auth
 
 STATE_DIR_NAME = ".orchestrator"
 CCX_DIR_NAME = ".ccx"
+LOCAL_CCX_DIR_NAME = ".ccx-local"
 RUNS_DIR_NAME = "runs"
 CURRENT_RUN_FILE = "current-run"
 RECOMMENDATIONS = {"approve", "revise", "reject"}
@@ -322,6 +323,33 @@ def next_question_path(paths: StatePaths, worker_id: str) -> Path:
     return paths.questions / f"{worker_id}-{next_number:03d}.md"
 
 
+def local_run_id(run_id: str) -> str:
+    """Return a stable local fallback run id.
+
+    Args:
+        run_id: Shared ccx run id, when available.
+    """
+    return run_id or "legacy"
+
+
+def local_handoff_path(worktree: Path, run_id: str, worker_id: str) -> Path:
+    """Return the worker-local handoff fallback path.
+
+    Args:
+        worktree: Worker worktree path.
+        run_id: Shared ccx run id.
+        worker_id: Worker identifier.
+    """
+    return (
+        worktree
+        / LOCAL_CCX_DIR_NAME
+        / RUNS_DIR_NAME
+        / local_run_id(run_id)
+        / "handoffs"
+        / f"{worker_id}.md"
+    )
+
+
 def resolve_question_name(question_name: str) -> str:
     """Normalize a question file name while rejecting path traversal.
 
@@ -467,6 +495,54 @@ def command_run_id(repo: Path, explicit_run: str | None, paths: StatePaths) -> s
     return ""
 
 
+def completed_process_detail(exc: subprocess.CalledProcessError) -> str:
+    """Return compact stderr/stdout details for a failed subprocess.
+
+    Args:
+        exc: Failed subprocess error.
+    """
+    detail = str(exc)
+    stderr = (exc.stderr or "").strip()
+    stdout = (exc.stdout or "").strip()
+    if stderr:
+        detail += f"; stderr: {stderr[:500]}"
+    if stdout:
+        detail += f"; stdout: {stdout[:500]}"
+    return detail
+
+
+def validation_recommendation(validation_file: Path) -> str:
+    """Read the recommendation value from a worker validation file.
+
+    Args:
+        validation_file: Validation markdown file.
+    """
+    in_recommendation = False
+    for raw_line in validation_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line == "## Recommendation":
+            in_recommendation = True
+            continue
+        if in_recommendation and line:
+            return line.lower()
+    return ""
+
+
+def all_validations_approve(paths: StatePaths) -> bool:
+    """Return whether every expected worker validation recommends approval.
+
+    Args:
+        paths: Resolved orchestration paths.
+    """
+    status = build_status(paths)
+    if status["missing_validations"] or status["questions"]:
+        return False
+    validation_files = list_markdown_files(paths.validations)
+    if len(validation_files) != status["task_count"]:
+        return False
+    return all(validation_recommendation(path) == "approve" for path in validation_files)
+
+
 def approval_resume_prompt(repo: Path, run_id: str, worker_id: str) -> str:
     """Build the prompt sent to workers after approval.
 
@@ -476,11 +552,9 @@ def approval_resume_prompt(repo: Path, run_id: str, worker_id: str) -> str:
         worker_id: Worker identifier.
     """
     return (
-        f"ccx approval received for {run_id}. You are {worker_id}. "
-        f"Run `ccx check-barrier {repo} --run {run_id}`, then continue implementation "
-        "in your assigned worktree only. When complete, write your handoff with "
-        f"`ccx handoff {repo} {worker_id} --run {run_id} ...`. If blocked, write a "
-        "ccx question and pause."
+        f"Approval ready for {run_id}. {worker_id}: continue your assigned implementation "
+        "in your worker worktree. Do not run ccx stop. If blocked, write a ccx question "
+        "and pause. When done, write ccx handoff for this run."
     )
 
 
@@ -520,8 +594,14 @@ def notify_workers_of_approval(repo: Path, paths: StatePaths, run_id: str) -> in
                 capture_output=True,
                 text=True,
             )
-        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        except FileNotFoundError as exc:
             print(f"warning: failed to notify {worker_id} after approval: {exc}", file=sys.stderr)
+            continue
+        except subprocess.CalledProcessError as exc:
+            detail = completed_process_detail(exc)
+            print(
+                f"warning: failed to notify {worker_id} after approval: {detail}", file=sys.stderr
+            )
             continue
         notified += 1
 
@@ -531,6 +611,54 @@ def notify_workers_of_approval(repo: Path, paths: StatePaths, run_id: str) -> in
         write_runtime_state(paths, state)
         print(f"notified workers after approval: {notified}")
     return notified
+
+
+def notify_conductor_validations_ready(repo: Path, paths: StatePaths, run_id: str) -> bool:
+    """Notify the recorded conductor surface that validations are ready.
+
+    Args:
+        repo: Target repository path.
+        paths: Resolved orchestration paths.
+        run_id: Run identifier.
+    """
+    if paths.approval_file.exists() or not all_validations_approve(paths):
+        return False
+    state = read_runtime_state(paths)
+    conductor = state.get("conductor", {})
+    if not isinstance(conductor, dict):
+        return False
+    workspace = str(conductor.get("workspace") or state.get("cmux_workspace") or "")
+    surface = str(conductor.get("surface") or "")
+    if not workspace or not surface:
+        return False
+    message = (
+        f"All ccx validations are complete for {run_id} with approve recommendations. "
+        f"Review validations, then run: ccx approve {repo} --run {run_id}"
+    )
+    try:
+        subprocess.run(
+            ["cmux", "send", "--workspace", workspace, "--surface", surface, message],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["cmux", "send-key", "--workspace", workspace, "--surface", surface, "enter"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        print(f"warning: failed to notify conductor after validations: {exc}", file=sys.stderr)
+        return False
+    except subprocess.CalledProcessError as exc:
+        detail = completed_process_detail(exc)
+        print(f"warning: failed to notify conductor after validations: {detail}", file=sys.stderr)
+        return False
+    print("notified conductor that validations are ready")
+    return True
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -661,6 +789,11 @@ def command_check_barrier(args: argparse.Namespace) -> int:
     """
     repo = resolve_repo(args.target_repo)
     paths = existing_command_state_paths(repo, args.run)
+    state = read_runtime_state(paths)
+    status = str(state.get("status") or "")
+    if status == "stopped":
+        print(f"not approved: run is stopped in {runtime_state_path(paths)}")
+        return 1
     if paths.approval_file.exists():
         print(f"approved: {paths.approval_file}")
         return 0
@@ -676,6 +809,9 @@ def command_approve(args: argparse.Namespace) -> int:
     """
     repo = resolve_repo(args.target_repo)
     paths = existing_command_state_paths(repo, args.run)
+    state = read_runtime_state(paths)
+    if state.get("status") == "stopped" and not args.force:
+        raise CliError("run is stopped; resume it first or pass --force")
 
     task_files = list_markdown_files(paths.tasks)
     if not task_files:
@@ -812,6 +948,7 @@ def command_validation(args: argparse.Namespace) -> int:
 """
     write_text(validation_file, content, force=args.force)
     print(f"wrote validation: {validation_file}")
+    notify_conductor_validations_ready(repo, paths, command_run_id(repo, args.run, paths))
     return 0
 
 
@@ -824,6 +961,7 @@ def command_handoff(args: argparse.Namespace) -> int:
     repo = resolve_repo(args.target_repo)
     paths = existing_command_state_paths(repo, args.run)
     ensure_state_dirs(paths)
+    run_id = command_run_id(repo, args.run, paths)
     handoff_file = paths.handoffs / f"{args.worker_id}.md"
     content = f"""# Worker Handoff
 
@@ -857,8 +995,14 @@ def command_handoff(args: argparse.Namespace) -> int:
 
 {args.integration_notes}
 """
-    write_text(handoff_file, content, force=args.force)
-    print(f"wrote handoff: {handoff_file}")
+    try:
+        write_text(handoff_file, content, force=args.force)
+        print(f"wrote handoff: {handoff_file}")
+    except PermissionError as exc:
+        fallback_file = local_handoff_path(Path.cwd(), run_id, args.worker_id)
+        write_text(fallback_file, content, force=True)
+        print(f"warning: shared handoff write failed: {exc}", file=sys.stderr)
+        print(f"wrote local handoff fallback: {fallback_file}")
     return 0
 
 

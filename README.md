@@ -81,7 +81,7 @@ cd /path/to/your-repo
 ccx
 ```
 
-Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, launches Codex worker panes in cmux, and starts the Claude conductor in the current `ccx` terminal.
+Then describe the task. `ccx` asks Claude Opus to decide the worker split, creates run-scoped state under `.ccx/runs/<run-id>/`, creates integration/worker git worktrees, overlays current uncommitted tracked changes and untracked source files from the starting repository, launches Codex worker panes in cmux, and starts the Claude conductor in the current `ccx` terminal.
 
 At the pre-launch prompt, type `/` to open a styled slash-command picker. Use arrow keys
 to move and Enter to select. The list includes Claude-native command references and ccx
@@ -100,13 +100,14 @@ ccx run --no-conductor "implement the requested feature"
 2. Claude creates isolated worker worktrees and sends validation-only tasks to Codex workers.
 3. Codex workers validate scope first and do not edit code before approval.
 4. If a task is unclear, overlapping, or risky, the worker writes a question and stops.
-5. Claude resolves questions and writes the approval barrier.
-6. `ccx approve` records approval and sends a resume prompt to recorded worker panes.
-7. Workers also poll the approval barrier after validation, then implement independently.
-8. Workers stop only themselves when new uncertainty appears.
-9. Workers write handoff documents when done.
-10. Claude reviews handoffs, integrates branches, resolves conflicts, and runs checks.
-11. Claude splits commits, pushes, opens a PR, and waits for explicit human approval before merge.
+5. When every validation recommends approval, ccx nudges the recorded conductor pane.
+6. Claude resolves questions and writes the approval barrier.
+7. `ccx approve` records approval and sends a resume prompt to recorded worker panes.
+8. Workers also poll the approval barrier after validation, then implement independently.
+9. Workers stop only themselves when new uncertainty appears.
+10. Workers write handoff documents when done.
+11. Claude reviews handoffs, integrates branches, resolves conflicts, and runs checks.
+12. Claude splits commits, pushes, opens a PR, and waits for explicit human approval before merge.
 
 ## Runtime Commands
 
@@ -133,7 +134,29 @@ the shared run state as `--add-dir`, and `--ask-for-approval never`. This keeps
 validation/question/handoff writes non-interactive while the sandbox still blocks writes
 outside the worktree and shared run state.
 
-`Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated conductor and worker prompts include an interrupt recovery rule: before resuming after an explicit user interrupt, the agent checks `ccx status --run <run-id> --json`; if the run is still stale `running`, it first runs `ccx stop --run <run-id>`.
+Worker and integration worktrees are created with `git worktree add` first. Because
+plain git worktrees only contain committed `HEAD` files, ccx then overlays the
+starting repository's dirty tracked files and untracked non-ignored source files.
+Internal orchestration directories such as `.git`, `.ccx`, `.orchestrator`, and
+`.ccx-worktrees` are excluded from that overlay.
+
+If a worker cannot write a handoff into the shared run state because the Codex
+sandbox rejects the path, `ccx handoff` writes a worker-local fallback under
+`.ccx-local/runs/<run-id>/handoffs/`. `ccx status` and `ccx watch` count those
+fallback handoffs so the conductor does not mistake completed workers for still
+running workers.
+
+`Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated prompts include interrupt recovery rules. The conductor may mark a stale interrupted run stopped with `ccx stop --run <run-id>`. Workers only check status and report back; they do not write global stop state from their sandbox. `ccx check-barrier` refuses stopped runs even if `approved.json` already exists.
+
+Worker prompts reference a shared `prompts/hard_rules.md` file instead of duplicating
+the full common protocol into every worker prompt. Each worker prompt contains only
+the task-specific paths and commands plus an `@.../hard_rules.md` reference.
+
+Installed Claude slash commands include routine allowed tools for `ccx`, `cmux
+read-screen`, `ls`, and `cat`. Claude may still ask for confirmation when it chooses
+compound shell commands such as `cmd && cmd`, pipes, scripts, or commands outside the
+allowlist, so generated conductor prompts tell Claude to use simple single-command
+inspection calls.
 
 Manual state commands use `.ccx/current-run` by default. Add `--run <run-id>` when
 you need to target a specific orchestration explicitly:
@@ -179,9 +202,11 @@ export CCX_CODEX_EFFORT=medium
 - Workers must not edit files before the run approval barrier exists.
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - `ccx approve` should notify recorded worker panes; workers also wait on `ccx check-barrier`.
+- `ccx check-barrier` blocks stopped runs even when the approval file exists.
+- `ccx status` and `ccx watch` include worker-local handoff fallbacks.
 - Same-file edits by multiple workers require explicit Claude arbitration.
 - `Ctrl-C` in a launched pane and `ccx stop` mark state stopped by default. They close cmux panes only with `--close-cmux`.
-- `Esc` is recovered by prompt protocol on resume: agents only stop stale `running` state when recovering from an explicit user interrupt.
+- `Esc` is recovered by prompt protocol on resume: the conductor stops stale `running` state only when recovering from an explicit user interrupt; workers report stopped state and wait.
 - Merge requires explicit human approval.
 
 ## Repository Layout
@@ -189,7 +214,8 @@ export CCX_CODEX_EFFORT=medium
 - `docs/architecture.md`: system model and responsibilities.
 - `docs/workflow.md`: end-to-end operating flow.
 - `prompts/claude-conductor.md`: prompt for the Claude conductor running in the current ccx terminal.
-- `prompts/codex-worker.md`: prompt for each Codex worker pane.
+- `prompts/hard_rules.md`: shared worker protocol referenced by every worker prompt.
+- `prompts/worker-NN.md`: task-specific prompt for each Codex worker pane.
 - `templates/`: task, validation, question, and handoff templates.
 - `src/claude_codex/`: Python CLI implementation.
 - `scripts/install-local.sh`: editable install + Claude command install + doctor.

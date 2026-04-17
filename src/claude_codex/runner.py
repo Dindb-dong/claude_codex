@@ -36,7 +36,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in incomplete i
     Style = None  # type: ignore[assignment]
 
 from claude_codex.claude_commands import install_claude_commands
-from claude_codex.cli import CliError, StatePaths, ensure_state_dirs, write_text
+from claude_codex.cli import CliError, StatePaths, ensure_state_dirs, local_handoff_path, write_text
 from claude_codex.preflight import check_claude_auth, claude_auth_failure_message
 
 MAX_AUTO_WORKERS = 5
@@ -372,6 +372,87 @@ def ensure_git_exclude(repo: Path, patterns: list[str]) -> None:
                 handle.write("\n")
             for pattern in additions:
                 handle.write(f"{pattern}\n")
+
+
+SNAPSHOT_EXCLUDED_ROOTS = {".git", ".ccx", ".orchestrator", ".ccx-worktrees"}
+
+
+def should_copy_snapshot_path(relative_path: Path) -> bool:
+    """Return whether a source snapshot path should be copied to worker worktrees.
+
+    Args:
+        relative_path: Path relative to the source repository.
+    """
+    parts = relative_path.parts
+    return bool(parts) and parts[0] not in SNAPSHOT_EXCLUDED_ROOTS
+
+
+def snapshot_overlay_paths(repo: Path) -> set[Path]:
+    """Return tracked dirty and untracked source paths missing from plain git worktrees.
+
+    Args:
+        repo: Source repository path.
+    """
+    paths: set[Path] = set()
+    dirty_output = run_command(["git", "diff", "--name-only", "-z", "HEAD", "--"], cwd=repo)
+    untracked_output = run_command(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=repo,
+    )
+    for output in (dirty_output, untracked_output):
+        for raw_path in output.split("\0"):
+            if not raw_path:
+                continue
+            relative_path = Path(raw_path)
+            if should_copy_snapshot_path(relative_path):
+                paths.add(relative_path)
+    return paths
+
+
+def remove_path(path: Path) -> None:
+    """Remove a file, symlink, or directory if present.
+
+    Args:
+        path: Destination path to remove.
+    """
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def copy_snapshot_path(repo: Path, destination: Path, relative_path: Path) -> None:
+    """Copy one source snapshot path into a worktree, or remove it when deleted.
+
+    Args:
+        repo: Source repository path.
+        destination: Destination worktree path.
+        relative_path: Path relative to the source repository.
+    """
+    source_path = repo / relative_path
+    destination_path = destination / relative_path
+    if not source_path.exists() and not source_path.is_symlink():
+        remove_path(destination_path)
+        return
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    remove_path(destination_path)
+    if source_path.is_symlink():
+        destination_path.symlink_to(os.readlink(source_path))
+    elif source_path.is_dir():
+        shutil.copytree(source_path, destination_path, symlinks=True)
+    else:
+        shutil.copy2(source_path, destination_path)
+
+
+def overlay_current_source_snapshot(repo: Path, destination: Path) -> None:
+    """Overlay uncommitted tracked changes and untracked files onto a git worktree.
+
+    Args:
+        repo: Source repository path.
+        destination: Destination worktree path.
+    """
+    for relative_path in sorted(snapshot_overlay_paths(repo)):
+        copy_snapshot_path(repo, destination, relative_path)
 
 
 def ccx_root(repo: Path) -> Path:
@@ -857,23 +938,39 @@ def create_worktrees(repo: Path, run_id: str, plan: Plan, integration_worktree: 
         ],
         cwd=repo,
     )
+    overlay_current_source_snapshot(repo, integration_worktree)
     for task in plan.tasks:
         task.worktree.parent.mkdir(parents=True, exist_ok=True)
         run_command(
             ["git", "worktree", "add", "-b", task.branch, str(task.worktree), "HEAD"],
             cwd=repo,
         )
+        overlay_current_source_snapshot(repo, task.worktree)
 
 
-def interrupt_recovery_prompt(config: RunConfig, run_id: str) -> str:
+def interrupt_recovery_prompt(config: RunConfig, run_id: str, *, role: str) -> str:
     """Return prompt rules for recovering stale run state after user interrupts.
 
     Args:
         config: Runner configuration.
         run_id: Run identifier.
+        role: Agent role receiving the prompt.
     """
     status_command = f"ccx status {config.repo} --run {run_id} --json"
     stop_command = f"ccx stop {config.repo} --run {run_id}"
+    if role == "worker":
+        lines = [
+            "Interrupt recovery:",
+            "- Ctrl-C is handled by the ccx agent wrapper and should mark this run stopped "
+            "automatically.",
+            "- Esc may interrupt Codex without notifying ccx.",
+            f"- Before resuming after any explicit user interrupt, run: {status_command}",
+            "- If status is `stopped`, do not implement even if approved.json exists. "
+            "Tell the conductor and wait.",
+            "- Do not run `ccx stop` from a worker sandbox; only the conductor should change "
+            "global run state.",
+        ]
+        return "\n".join(lines)
     lines = [
         "Interrupt recovery:",
         "- Ctrl-C is handled by the ccx agent wrapper and should mark this run stopped "
@@ -932,23 +1029,68 @@ Hard workflow:
 5. `ccx approve` resumes recorded worker panes automatically. Do not assume workers
    will wake up from file creation alone.
 6. Review handoffs in {paths.handoffs} as they arrive. Prefer `{watch_command}`
-   or `{status_command}` over long background sleep polling.
-7. If you inspect cmux worker output, use `cmux read-screen --workspace <workspace>
+   or `{status_command}` over long background sleep polling. Status includes
+   worker-local handoff fallbacks if a worker cannot write to shared state.
+7. Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not
+   combine commands with `&&`, pipes, command substitution, or shell scripts unless
+   the user explicitly asks.
+8. If you inspect cmux worker output, use `cmux read-screen --workspace <workspace>
    --surface <surface> --scrollback --lines 80`.
    Do not use `cmux read-pane`; that is not a cmux command.
-8. Integrate worker branches into {integration_worktree}.
-9. Resolve conflicts or reassign focused fixes.
-10. Run formatting, linting, and tests.
-11. Split coherent commits and push a branch/PR.
-12. Do not merge without explicit human approval.
+9. Integrate worker branches into {integration_worktree}.
+10. Resolve conflicts or reassign focused fixes.
+11. Run formatting, linting, and tests.
+12. Split coherent commits and push a branch/PR.
+13. Do not merge without explicit human approval.
 
-{interrupt_recovery_prompt(config, run_id)}
+{interrupt_recovery_prompt(config, run_id, role="conductor")}
 
 Start by reading {paths.root / "plan.md"} and the task files.
 """
 
 
-def worker_prompt(config: RunConfig, task: WorkerTask, paths: StatePaths, run_id: str) -> str:
+def worker_hard_rules_prompt(config: RunConfig, paths: StatePaths, run_id: str) -> str:
+    """Build the shared hard-rules prompt for every Codex worker.
+
+    Args:
+        config: Runner configuration.
+        paths: Shared state paths.
+        run_id: Run identifier.
+    """
+    return f"""# ccx Worker Hard Rules
+
+These rules apply to every Codex worker in this run.
+
+1. First validate your task boundary only. Do not edit code yet.
+2. If anything is ambiguous, overlapping, or risky, write a question and pause.
+3. If validation has no blocking question, wait for approval before implementation.
+4. Do not implement until this approval barrier exists and ccx check-barrier succeeds:
+   {paths.approval_file}
+5. Work only in your assigned worker worktree after approval.
+6. If uncertainty appears during implementation, pause only yourself and write a question.
+7. On completion, write a ccx handoff.
+   If ccx reports "wrote local handoff fallback", treat that as a successful
+   handoff and tell the conductor the fallback path.
+8. Do not merge or push.
+9. The Codex session is launched with this shared state directory as an additional
+   writable root, so do not ask the user for approval just to write validation,
+   question, approval-check, or handoff files under: {paths.root}
+10. Your Codex approval policy is non-interactive. Do not ask the user to approve
+    ccx validation/question/handoff writes. If ccx handoff writes a local fallback,
+    continue reporting completion. For any other sandboxed command failure, report
+    the exact failure to the conductor and stop.
+
+{interrupt_recovery_prompt(config, run_id, role="worker")}
+"""
+
+
+def worker_prompt(
+    config: RunConfig,
+    task: WorkerTask,
+    paths: StatePaths,
+    run_id: str,
+    hard_rules_path: Path,
+) -> str:
     """Build the interactive Codex worker prompt.
 
     Args:
@@ -956,6 +1098,7 @@ def worker_prompt(config: RunConfig, task: WorkerTask, paths: StatePaths, run_id
         task: Worker task.
         paths: Shared state paths.
         run_id: Run identifier.
+        hard_rules_path: Shared worker hard-rules file path.
     """
     validation_command = (
         f"ccx validation {config.repo} {task.worker_id} --run {run_id} "
@@ -978,31 +1121,26 @@ Target request:
 Shared state directory:
 {paths.root}
 
+Common hard rules:
+@{hard_rules_path}
+
+Read the common hard rules file before doing anything.
+
 Your task file:
 {paths.tasks / f"{task.worker_id}.md"}
 
-Hard rules:
-1. First validate your task boundary only. Do not edit code yet.
-2. Write validation with this shape:
-   {validation_command}
-3. If anything is ambiguous, overlapping, or risky, write a question with this shape:
-   {question_command}
-4. If validation has no blocking question, wait for approval with:
-   {barrier_wait_command}
-5. Do not implement until this approval barrier exists: {paths.approval_file}
-6. After approval, work only in this worktree: {task.worktree}
-7. If uncertainty appears during implementation, pause only yourself and write a question.
-8. On completion, write handoff with this shape:
-   {handoff_command}
-9. Do not merge or push.
-10. The Codex session is launched with this shared state directory as an additional
-   writable root, so do not ask the user for approval just to write validation,
-   question, approval-check, or handoff files under: {paths.root}
-11. Your Codex approval policy is non-interactive. Do not ask the user to approve
-    ccx validation/question/handoff writes; if a sandboxed command fails, report the
-    exact failure to the conductor and stop.
+Your worktree after approval:
+{task.worktree}
 
-{interrupt_recovery_prompt(config, run_id)}
+Required commands:
+- Write validation:
+  {validation_command}
+- If blocked, write a question:
+  {question_command}
+- Wait for approval:
+  {barrier_wait_command}
+- Write handoff:
+  {handoff_command}
 
 Begin by reading your task file and producing validation.
 """
@@ -1033,9 +1171,20 @@ def write_prompt_files(
         force=config.force_state,
     )
     prompt_paths["conductor"] = conductor_path
+    hard_rules_path = prompt_dir / "hard_rules.md"
+    write_text(
+        hard_rules_path,
+        worker_hard_rules_prompt(config, paths, run_id),
+        force=config.force_state,
+    )
+    prompt_paths["hard_rules"] = hard_rules_path
     for task in plan.tasks:
         path = prompt_dir / f"{task.worker_id}.md"
-        write_text(path, worker_prompt(config, task, paths, run_id), force=config.force_state)
+        write_text(
+            path,
+            worker_prompt(config, task, paths, run_id, hard_rules_path),
+            force=config.force_state,
+        )
         prompt_paths[task.worker_id] = path
     return prompt_paths
 
@@ -1517,11 +1666,33 @@ def exec_foreground_agent(
         raise CliError("zsh shell not found for foreground agent launch") from exc
 
 
-def runtime_counts(paths: StatePaths) -> dict[str, int]:
+def local_handoff_files(state: dict[str, Any]) -> list[Path]:
+    """Return worker-local handoff fallback files recorded under worker worktrees.
+
+    Args:
+        state: Runtime state payload.
+    """
+    run_id = str(state.get("run_id") or "")
+    files: list[Path] = []
+    for worker in state.get("workers", []):
+        if not isinstance(worker, dict):
+            continue
+        worker_id = str(worker.get("id") or "")
+        worktree = Path(str(worker.get("worktree") or ""))
+        if not worker_id or not worktree:
+            continue
+        path = local_handoff_path(worktree, run_id, worker_id)
+        if path.exists():
+            files.append(path)
+    return files
+
+
+def runtime_counts(paths: StatePaths, state: dict[str, Any] | None = None) -> dict[str, int]:
     """Count state files in the shared runtime directory.
 
     Args:
         paths: Shared orchestration paths.
+        state: Optional runtime state payload.
     """
     tasks = list(paths.tasks.glob("*.md")) if paths.tasks.exists() else []
     validations = list(paths.validations.glob("*.md")) if paths.validations.exists() else []
@@ -1534,12 +1705,17 @@ def runtime_counts(paths: StatePaths) -> dict[str, int]:
         list(paths.resolved_questions.glob("*.md")) if paths.resolved_questions.exists() else []
     )
     handoffs = list(paths.handoffs.glob("*.md")) if paths.handoffs.exists() else []
+    shared_handoff_ids = {path.stem for path in handoffs}
+    local_handoffs = local_handoff_files(state or {})
+    local_only_handoffs = [path for path in local_handoffs if path.stem not in shared_handoff_ids]
     return {
         "tasks": len(tasks),
         "validations": len(validations),
         "questions": len(questions),
         "resolved_questions": len(resolved),
-        "handoffs": len(handoffs),
+        "handoffs": len(shared_handoff_ids) + len(local_only_handoffs),
+        "shared_handoffs": len(shared_handoff_ids),
+        "local_handoffs": len(local_only_handoffs),
     }
 
 
@@ -1553,7 +1729,7 @@ def runtime_status(repo: Path, run_id: str | None = None) -> dict[str, Any]:
     root = git_root(repo)
     paths = resolve_state_paths(root, run_id)
     state = read_runtime_state(root, run_id)
-    counts = runtime_counts(paths)
+    counts = runtime_counts(paths, state)
     return {
         "repo": str(root),
         "state_dir": str(paths.root),
@@ -1613,6 +1789,8 @@ def format_runtime_status(status: dict[str, Any]) -> str:
             f"handoffs: {counts['handoffs']}/{counts['tasks']}",
         ]
     )
+    if counts.get("local_handoffs"):
+        lines.append(f"local handoff fallbacks: {counts['local_handoffs']}")
     return "\n".join(lines)
 
 
@@ -1648,6 +1826,18 @@ def apply_worker_launch_metadata(state: dict[str, Any], launch: WorkerLaunch) ->
             continue
         worker["pane"] = pane.pane
         worker["surface"] = pane.surface
+
+
+def current_conductor_metadata() -> dict[str, str]:
+    """Return cmux metadata for the current Claude conductor surface when available."""
+    workspace = os.environ.get("CMUX_WORKSPACE_ID", "")
+    surface = os.environ.get("CMUX_SURFACE_ID", "")
+    metadata: dict[str, str] = {}
+    if workspace:
+        metadata["workspace"] = workspace
+    if surface:
+        metadata["surface"] = surface
+    return metadata
 
 
 def watch_runtime(
@@ -2129,6 +2319,7 @@ def run_orchestration(config: RunConfig) -> int:
             "branch": f"ccx/{run_id}/integration",
             "worktree": str(integration_worktree),
         },
+        "conductor": current_conductor_metadata(),
         "models": {
             "claude": config.claude_model,
             "claude_effort": config.claude_effort,
