@@ -140,8 +140,8 @@ conductor can identify worker roles at a glance while panes are running.
 Worker and integration worktrees are created with `git worktree add` first. Because
 plain git worktrees only contain committed `HEAD` files, ccx then overlays the
 starting repository's dirty tracked files and untracked non-ignored source files.
-Internal orchestration directories such as `.git`, `.ccx`, `.orchestrator`, and
-`.ccx-worktrees` are excluded from that overlay.
+Internal orchestration directories such as `.git`, `.ccx`, and `.ccx-worktrees`
+are excluded from that overlay.
 
 If a worker cannot write a question or handoff into the shared run state because
 the Codex sandbox rejects the path, `ccx question` and `ccx handoff` write
@@ -187,10 +187,6 @@ ccx handoff <target-repo> <worker-id> \
   --test "python -m unittest"
 ```
 
-`ccx init <target-repo> <run-name> <worker-count>` is retained only for legacy
-manual `.orchestrator/` template experiments. Normal orchestration should start
-with `ccx`, `ccx run`, or `/ccx-run`, which create `.ccx/runs/<run-id>/`.
-
 ## Default Models
 
 - Claude conductor: `opus`, effort `medium`.
@@ -229,7 +225,6 @@ export CCX_CODEX_EFFORT=medium
 - `src/claude_codex/`: Python CLI implementation.
 - `scripts/install-local.sh`: editable install + Claude command install + doctor.
 - `scripts/claude-codex`: local wrapper for repo development.
-- `scripts/bootstrap-run.sh`: compatibility wrapper for legacy `claude-codex init`.
 
 ## Development
 

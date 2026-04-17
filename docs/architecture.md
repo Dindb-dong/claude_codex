@@ -1,6 +1,6 @@
 # Architecture
 
-`ccx` coordinates one Claude conductor and multiple Codex workers inside cmux, with durable state stored in the target repository. The default runtime path is `.ccx/runs/<run-id>/`; `.orchestrator/` is only the legacy manual-template path used by `ccx init`.
+`ccx` coordinates one Claude conductor and multiple Codex workers inside cmux, with durable state stored under `.ccx/runs/<run-id>/` in the target repository.
 
 ## Roles
 
@@ -37,7 +37,7 @@ cmux provides the terminal workspace, panes, and surfaces. ccx launches worker p
 
 ### Git Worktrees
 
-ccx creates an integration worktree and one worker worktree per task. It uses `git worktree add` first, then overlays the starting repository's dirty tracked files and untracked non-ignored source files into each worktree. Internal orchestration paths such as `.git`, `.ccx`, `.orchestrator`, and `.ccx-worktrees` are excluded.
+ccx creates an integration worktree and one worker worktree per task. It uses `git worktree add` first, then overlays the starting repository's dirty tracked files and untracked non-ignored source files into each worktree. Internal orchestration paths such as `.git`, `.ccx`, and `.ccx-worktrees` are excluded.
 
 ## Runtime State
 
