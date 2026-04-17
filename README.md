@@ -134,6 +134,9 @@ the shared run state as `--add-dir`, and `--ask-for-approval never`. This keeps
 validation/question/handoff writes non-interactive while the sandbox still blocks writes
 outside the worktree and shared run state.
 
+ccx renames each cmux worker surface tab to `<worker-id>: <task title>` so the
+conductor can identify worker roles at a glance while panes are running.
+
 Worker and integration worktrees are created with `git worktree add` first. Because
 plain git worktrees only contain committed `HEAD` files, ccx then overlays the
 starting repository's dirty tracked files and untracked non-ignored source files.

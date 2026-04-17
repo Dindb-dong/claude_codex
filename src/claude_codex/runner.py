@@ -128,11 +128,13 @@ class WorkerPane:
         worker_id: Stable worker identifier.
         pane: cmux pane ref.
         surface: cmux terminal surface ref.
+        title: Human-readable cmux tab title.
     """
 
     worker_id: str
     pane: str
     surface: str
+    title: str = ""
 
 
 @dataclass(frozen=True)
@@ -1247,6 +1249,37 @@ def first_surface_ref(output: str) -> str:
     return match.group(0)
 
 
+def worker_tab_title(worker_id: str, title: str) -> str:
+    """Build a compact cmux tab title for a worker.
+
+    Args:
+        worker_id: Stable worker identifier.
+        title: Planner task title.
+    """
+    clean_title = re.sub(r"\s+", " ", title).strip() or "worker"
+    label = f"{worker_id}: {clean_title}"
+    if len(label) <= 72:
+        return label
+    return f"{label[:69].rstrip()}..."
+
+
+def rename_worker_tab(repo: Path, workspace: str, surface: str, title: str) -> None:
+    """Best-effort rename for the cmux surface tab that hosts a worker.
+
+    Args:
+        repo: Target repository path.
+        workspace: cmux workspace ref.
+        surface: cmux surface ref.
+        title: Tab title.
+    """
+    with suppress(CliError):
+        run_command(
+            ["cmux", "rename-tab", "--workspace", workspace, "--surface", surface, title],
+            cwd=repo,
+            timeout=30,
+        )
+
+
 def claude_child_command(repo: Path, paths: StatePaths, *, model: str, effort: str) -> list[str]:
     """Build the Claude conductor child command.
 
@@ -1354,11 +1387,15 @@ def launch_cmux_workers(
         cwd=config.repo,
         timeout=30,
     )
+    first_surface = first_surface_ref(first_surface_output)
+    first_title = worker_tab_title(first_task.worker_id, first_task.title)
+    rename_worker_tab(config.repo, workspace, first_surface, first_title)
     launched = [
         WorkerPane(
             worker_id=first_task.worker_id,
             pane=first_pane,
-            surface=first_surface_ref(first_surface_output),
+            surface=first_surface,
+            title=first_title,
         )
     ]
 
@@ -1390,6 +1427,7 @@ def launch_cmux_workers(
             timeout=30,
         )
         surface = first_surface_ref(surface_output)
+        title = worker_tab_title(task.worker_id, task.title)
         codex_command = agent_command_with_prompt(
             repo=config.repo,
             run_id=run_id,
@@ -1417,7 +1455,10 @@ def launch_cmux_workers(
             cwd=config.repo,
             timeout=30,
         )
-        launched.append(WorkerPane(worker_id=task.worker_id, pane=pane, surface=surface))
+        rename_worker_tab(config.repo, workspace, surface, title)
+        launched.append(
+            WorkerPane(worker_id=task.worker_id, pane=pane, surface=surface, title=title)
+        )
     return WorkerLaunch(workspace=workspace, panes=launched)
 
 
@@ -1494,6 +1535,7 @@ def launch_cmux_workers_in_current_workspace(
             timeout=30,
         )
         surface = first_surface_ref(surface_output)
+        title = worker_tab_title(task.worker_id, task.title)
         codex_command = agent_command_with_prompt(
             repo=config.repo,
             run_id=run_id,
@@ -1521,7 +1563,10 @@ def launch_cmux_workers_in_current_workspace(
             cwd=config.repo,
             timeout=30,
         )
-        launched.append(WorkerPane(worker_id=task.worker_id, pane=pane, surface=surface))
+        rename_worker_tab(config.repo, workspace, surface, title)
+        launched.append(
+            WorkerPane(worker_id=task.worker_id, pane=pane, surface=surface, title=title)
+        )
     with suppress(CliError):
         run_command(
             ["cmux", "focus-pane", "--workspace", workspace, "--pane", base_pane],
@@ -1787,6 +1832,8 @@ def apply_worker_launch_metadata(state: dict[str, Any], launch: WorkerLaunch) ->
             continue
         worker["pane"] = pane.pane
         worker["surface"] = pane.surface
+        if pane.title:
+            worker["tab_title"] = pane.title
 
 
 def current_conductor_metadata() -> dict[str, str]:
@@ -1895,11 +1942,15 @@ def launch_cmux_workers_from_state(
         cwd=repo,
         timeout=30,
     )
+    first_surface = first_surface_ref(first_surface_output)
+    first_title = worker_tab_title(first_worker_id, str(first_worker.get("title") or "worker"))
+    rename_worker_tab(repo, workspace, first_surface, first_title)
     launched = [
         WorkerPane(
             worker_id=first_worker_id,
             pane=first_pane,
-            surface=first_surface_ref(first_surface_output),
+            surface=first_surface,
+            title=first_title,
         )
     ]
 
@@ -1936,6 +1987,7 @@ def launch_cmux_workers_from_state(
             timeout=30,
         )
         surface = first_surface_ref(surface_output)
+        title = worker_tab_title(worker_id, str(worker.get("title") or "worker"))
         codex_command = agent_command_with_prompt(
             repo=repo,
             run_id=run_id,
@@ -1963,7 +2015,8 @@ def launch_cmux_workers_from_state(
             cwd=repo,
             timeout=30,
         )
-        launched.append(WorkerPane(worker_id=worker_id, pane=pane, surface=surface))
+        rename_worker_tab(repo, workspace, surface, title)
+        launched.append(WorkerPane(worker_id=worker_id, pane=pane, surface=surface, title=title))
     return WorkerLaunch(workspace=workspace, panes=launched)
 
 
@@ -2290,6 +2343,7 @@ def run_orchestration(config: RunConfig) -> int:
         "workers": [
             {
                 "id": task.worker_id,
+                "title": task.title,
                 "branch": task.branch,
                 "worktree": str(task.worktree),
             }

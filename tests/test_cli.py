@@ -672,6 +672,7 @@ class CliTestCase(unittest.TestCase):
                             worker_id="worker-01",
                             pane="pane:1",
                             surface="surface:1",
+                            title="worker-01: UI update",
                         )
                     ],
                 ),
@@ -699,6 +700,7 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(run_state["conductor"]["workspace"], "workspace:conductor")
         self.assertEqual(run_state["conductor"]["surface"], "surface:conductor")
         self.assertEqual(run_state["workers"][0]["surface"], "surface:1")
+        self.assertEqual(run_state["workers"][0]["tab_title"], "worker-01: UI update")
         self.assertFalse(conductor.called)
         self.assertFalse(new_workspace_launcher.called)
 
@@ -782,6 +784,8 @@ class CliTestCase(unittest.TestCase):
                 return f"surface:{pane.split(':')[1]}"
             if command[:2] == ["cmux", "respawn-pane"]:
                 return ""
+            if command[:2] == ["cmux", "rename-tab"]:
+                return ""
             raise AssertionError(f"unexpected command: {command}")
 
         tasks = []
@@ -857,6 +861,17 @@ class CliTestCase(unittest.TestCase):
             command for command in calls if command[:2] == ["cmux", "respawn-pane"]
         )
         self.assertIn(f"--add-dir {self.repo / '.ccx/runs/run-1'}", " ".join(respawn_command))
+        rename_commands = [command for command in calls if command[:2] == ["cmux", "rename-tab"]]
+        self.assertEqual(
+            [command[-1] for command in rename_commands],
+            [
+                "worker-01: Worker 1",
+                "worker-02: Worker 2",
+                "worker-03: Worker 3",
+                "worker-04: Worker 4",
+                "worker-05: Worker 5",
+            ],
+        )
 
     def test_codex_child_command_adds_shared_state_writable_root(self) -> None:
         """Codex workers receive the run state directory as an extra writable root."""
