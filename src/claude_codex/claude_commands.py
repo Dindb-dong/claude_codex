@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+ROUTINE_ALLOWED_TOOLS = [
+    "Bash(ccx:*)",
+    "Bash(cmux read-screen:*)",
+    "Bash(ls:*)",
+    "Bash(cat:*)",
+]
+
 
 @dataclass(frozen=True)
 class ClaudeCommand:
@@ -42,7 +49,7 @@ COMMANDS = [
         name="ccx-run",
         description="run(ccx): Start worker orchestration from the current Claude session",
         argument_hint="<task request>",
-        allowed_tools=["Bash(ccx *)", "Bash(cat *)"],
+        allowed_tools=ROUTINE_ALLOWED_TOOLS,
         body="""Start a ccx worker orchestration while this Claude session remains the conductor.
 
 Use this when the user wants Claude-first orchestration. Do not launch a nested Claude CLI.
@@ -63,13 +70,17 @@ After the command completes:
 6. When consensus is reached, run `ccx approve <repo-path> --run <run-id>`.
 7. Continue as the conductor: review handoffs, integrate branches, run checks, commit,
    push, and open PRs.
+
+Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not chain
+commands with `&&`, pipes, command substitution, or shell scripts unless the user
+explicitly asks.
 """,
     ),
     ClaudeCommand(
         name="ccx-status",
         description="status(ccx): Show the current ccx orchestration state",
         argument_hint="[repo-path]",
-        allowed_tools=["Bash(ccx *)"],
+        allowed_tools=ROUTINE_ALLOWED_TOOLS,
         body="""Show the current ccx orchestration state.
 
 Run this command and summarize the result:
@@ -83,7 +94,7 @@ ccx status $ARGUMENTS
         name="ccx-watch",
         description="watch(ccx): Watch ccx orchestration progress",
         argument_hint="[repo-path] [--interval seconds]",
-        allowed_tools=["Bash(ccx *)"],
+        allowed_tools=ROUTINE_ALLOWED_TOOLS,
         body="""Watch ccx orchestration progress.
 
 Run this command. If the user did not pass a repo path, use the current repository:
@@ -99,7 +110,7 @@ Stop watching when the user asks you to stop or when the command exits.
         name="ccx-resume",
         description="resume(ccx): Relaunch the ccx conductor and worker panes",
         argument_hint="[repo-path]",
-        allowed_tools=["Bash(ccx *)"],
+        allowed_tools=ROUTINE_ALLOWED_TOOLS,
         body="""Resume a previous ccx run.
 
 Run this command and report which cmux workspace was created:
@@ -113,7 +124,7 @@ ccx resume $ARGUMENTS
         name="ccx-stop",
         description="stop(ccx): Mark a ccx run as stopped",
         argument_hint="[repo-path] [--close-cmux]",
-        allowed_tools=["Bash(ccx *)"],
+        allowed_tools=ROUTINE_ALLOWED_TOOLS,
         body="""Stop a ccx run.
 
 By default this marks the run as stopped without closing cmux panes.

@@ -210,7 +210,85 @@ class CliTestCase(unittest.TestCase):
         send_command = next(command for command in calls if command[:2] == ["cmux", "send"])
         self.assertIn("workspace:1", send_command)
         self.assertIn("surface:9", send_command)
-        self.assertIn("ccx approval received", " ".join(send_command))
+        self.assertIn("Approval ready", " ".join(send_command))
+        self.assertNotIn("check-barrier", " ".join(send_command))
+
+    def test_check_barrier_refuses_stopped_run(self) -> None:
+        """check-barrier blocks implementation when the run is stopped."""
+        run_id = "20260416000000000000-stopped"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "approvals").mkdir(parents=True)
+        (run_root / "approvals/approved.json").write_text('{"approved": true}\n', encoding="utf-8")
+        (run_root / "run-state.json").write_text(
+            json.dumps({"run_id": run_id, "status": "stopped"}),
+            encoding="utf-8",
+        )
+
+        exit_code = self.run_cli("check-barrier", str(self.repo), "--run", run_id)
+
+        self.assertEqual(exit_code, 1)
+
+    def test_validation_notifies_conductor_when_all_workers_approve(self) -> None:
+        """The final approve validation nudges the recorded conductor pane."""
+        run_id = "20260416000000000000-ready"
+        run_root = self.repo / ".ccx/runs" / run_id
+        (run_root / "tasks").mkdir(parents=True)
+        (run_root / "validations").mkdir()
+        for worker_id in ("worker-01", "worker-02"):
+            (run_root / f"tasks/{worker_id}.md").write_text(
+                f"""# Worker Task
+
+## Worker
+
+- ID: {worker_id}
+- Branch: ccx/demo/{worker_id}
+- Worktree: /tmp/{worker_id}
+""",
+                encoding="utf-8",
+            )
+        (run_root / "validations/worker-01.md").write_text(
+            "# Worker Validation\n\n## Recommendation\n\nApprove\n",
+            encoding="utf-8",
+        )
+        (run_root / "run-state.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": "running",
+                    "conductor": {
+                        "workspace": "workspace:7",
+                        "surface": "surface:3",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("claude_codex.cli.subprocess.run", side_effect=fake_run):
+            exit_code = self.run_cli(
+                "validation",
+                str(self.repo),
+                "worker-02",
+                "--run",
+                run_id,
+                "--scope-coherence",
+                "Scope is coherent.",
+                "--overlap-check",
+                "No overlap found.",
+                "--recommendation",
+                "approve",
+            )
+
+        self.assertEqual(exit_code, 0)
+        send_command = next(command for command in calls if command[:2] == ["cmux", "send"])
+        self.assertIn("workspace:7", send_command)
+        self.assertIn("surface:3", send_command)
+        self.assertIn("ccx approve", " ".join(send_command))
 
     def test_open_question_blocks_approval(self) -> None:
         """approve refuses to proceed when unresolved questions exist."""
@@ -494,10 +572,14 @@ class CliTestCase(unittest.TestCase):
         self.assertFalse((self.repo / ".orchestrator").exists())
         conductor_prompt = (run_dirs[0] / "prompts/claude-conductor.md").read_text(encoding="utf-8")
         worker_prompt = (run_dirs[0] / "prompts/worker-01.md").read_text(encoding="utf-8")
+        hard_rules_prompt = (run_dirs[0] / "prompts/hard_rules.md").read_text(encoding="utf-8")
         resolved_repo = self.repo.resolve()
         self.assertIn("Esc may interrupt Claude/Codex without notifying ccx", conductor_prompt)
         self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
-        self.assertIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
+        self.assertIn("@", worker_prompt)
+        self.assertIn("hard_rules.md", worker_prompt)
+        self.assertNotIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
+        self.assertIn("Do not run `ccx stop` from a worker sandbox", hard_rules_prompt)
         self.assertIn(f"until ccx check-barrier {resolved_repo} --run {current_run}", worker_prompt)
 
     def test_run_no_conductor_launches_workers_without_nested_claude(self) -> None:
@@ -520,6 +602,13 @@ class CliTestCase(unittest.TestCase):
         }
 
         with (
+            patch.dict(
+                os.environ,
+                {
+                    "CMUX_WORKSPACE_ID": "workspace:conductor",
+                    "CMUX_SURFACE_ID": "surface:conductor",
+                },
+            ),
             patch(
                 "claude_codex.runner.check_claude_auth", return_value=authenticated_claude_check()
             ),
@@ -557,6 +646,8 @@ class CliTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(run_state["status"], "running")
         self.assertEqual(run_state["cmux_workspace"], "workspace:1")
+        self.assertEqual(run_state["conductor"]["workspace"], "workspace:conductor")
+        self.assertEqual(run_state["conductor"]["surface"], "surface:conductor")
         self.assertEqual(run_state["workers"][0]["surface"], "surface:1")
         self.assertFalse(conductor.called)
         self.assertFalse(new_workspace_launcher.called)
@@ -808,8 +899,13 @@ class CliTestCase(unittest.TestCase):
         run_command_file = fake_home / ".claude/commands/ccx-run.md"
         self.assertTrue(command_file.exists())
         self.assertTrue(run_command_file.exists())
-        self.assertIn("status(ccx)", command_file.read_text(encoding="utf-8"))
-        self.assertIn("ccx run --no-conductor", run_command_file.read_text(encoding="utf-8"))
+        status_content = command_file.read_text(encoding="utf-8")
+        run_content = run_command_file.read_text(encoding="utf-8")
+        self.assertIn("status(ccx)", status_content)
+        self.assertIn("Bash(ccx:*)", status_content)
+        self.assertIn("Bash(cmux read-screen:*)", run_content)
+        self.assertIn("ccx run --no-conductor", run_content)
+        self.assertIn("Do not chain", run_content)
 
     def test_doctor_runs(self) -> None:
         """doctor returns a process status after checking external commands."""

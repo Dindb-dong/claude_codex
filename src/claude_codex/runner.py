@@ -865,15 +865,29 @@ def create_worktrees(repo: Path, run_id: str, plan: Plan, integration_worktree: 
         )
 
 
-def interrupt_recovery_prompt(config: RunConfig, run_id: str) -> str:
+def interrupt_recovery_prompt(config: RunConfig, run_id: str, *, role: str) -> str:
     """Return prompt rules for recovering stale run state after user interrupts.
 
     Args:
         config: Runner configuration.
         run_id: Run identifier.
+        role: Agent role receiving the prompt.
     """
     status_command = f"ccx status {config.repo} --run {run_id} --json"
     stop_command = f"ccx stop {config.repo} --run {run_id}"
+    if role == "worker":
+        lines = [
+            "Interrupt recovery:",
+            "- Ctrl-C is handled by the ccx agent wrapper and should mark this run stopped "
+            "automatically.",
+            "- Esc may interrupt Codex without notifying ccx.",
+            f"- Before resuming after any explicit user interrupt, run: {status_command}",
+            "- If status is `stopped`, do not implement even if approved.json exists. "
+            "Tell the conductor and wait.",
+            "- Do not run `ccx stop` from a worker sandbox; only the conductor should change "
+            "global run state.",
+        ]
+        return "\n".join(lines)
     lines = [
         "Interrupt recovery:",
         "- Ctrl-C is handled by the ccx agent wrapper and should mark this run stopped "
@@ -933,22 +947,63 @@ Hard workflow:
    will wake up from file creation alone.
 6. Review handoffs in {paths.handoffs} as they arrive. Prefer `{watch_command}`
    or `{status_command}` over long background sleep polling.
-7. If you inspect cmux worker output, use `cmux read-screen --workspace <workspace>
+7. Use simple, single-command Bash calls for routine ccx/cmux inspection. Do not
+   combine commands with `&&`, pipes, command substitution, or shell scripts unless
+   the user explicitly asks.
+8. If you inspect cmux worker output, use `cmux read-screen --workspace <workspace>
    --surface <surface> --scrollback --lines 80`.
    Do not use `cmux read-pane`; that is not a cmux command.
-8. Integrate worker branches into {integration_worktree}.
-9. Resolve conflicts or reassign focused fixes.
-10. Run formatting, linting, and tests.
-11. Split coherent commits and push a branch/PR.
-12. Do not merge without explicit human approval.
+9. Integrate worker branches into {integration_worktree}.
+10. Resolve conflicts or reassign focused fixes.
+11. Run formatting, linting, and tests.
+12. Split coherent commits and push a branch/PR.
+13. Do not merge without explicit human approval.
 
-{interrupt_recovery_prompt(config, run_id)}
+{interrupt_recovery_prompt(config, run_id, role="conductor")}
 
 Start by reading {paths.root / "plan.md"} and the task files.
 """
 
 
-def worker_prompt(config: RunConfig, task: WorkerTask, paths: StatePaths, run_id: str) -> str:
+def worker_hard_rules_prompt(config: RunConfig, paths: StatePaths, run_id: str) -> str:
+    """Build the shared hard-rules prompt for every Codex worker.
+
+    Args:
+        config: Runner configuration.
+        paths: Shared state paths.
+        run_id: Run identifier.
+    """
+    return f"""# ccx Worker Hard Rules
+
+These rules apply to every Codex worker in this run.
+
+1. First validate your task boundary only. Do not edit code yet.
+2. If anything is ambiguous, overlapping, or risky, write a question and pause.
+3. If validation has no blocking question, wait for approval before implementation.
+4. Do not implement until this approval barrier exists and ccx check-barrier succeeds:
+   {paths.approval_file}
+5. Work only in your assigned worker worktree after approval.
+6. If uncertainty appears during implementation, pause only yourself and write a question.
+7. On completion, write a ccx handoff.
+8. Do not merge or push.
+9. The Codex session is launched with this shared state directory as an additional
+   writable root, so do not ask the user for approval just to write validation,
+   question, approval-check, or handoff files under: {paths.root}
+10. Your Codex approval policy is non-interactive. Do not ask the user to approve
+    ccx validation/question/handoff writes; if a sandboxed command fails, report the
+    exact failure to the conductor and stop.
+
+{interrupt_recovery_prompt(config, run_id, role="worker")}
+"""
+
+
+def worker_prompt(
+    config: RunConfig,
+    task: WorkerTask,
+    paths: StatePaths,
+    run_id: str,
+    hard_rules_path: Path,
+) -> str:
     """Build the interactive Codex worker prompt.
 
     Args:
@@ -956,6 +1011,7 @@ def worker_prompt(config: RunConfig, task: WorkerTask, paths: StatePaths, run_id
         task: Worker task.
         paths: Shared state paths.
         run_id: Run identifier.
+        hard_rules_path: Shared worker hard-rules file path.
     """
     validation_command = (
         f"ccx validation {config.repo} {task.worker_id} --run {run_id} "
@@ -978,31 +1034,26 @@ Target request:
 Shared state directory:
 {paths.root}
 
+Common hard rules:
+@{hard_rules_path}
+
+Read the common hard rules file before doing anything.
+
 Your task file:
 {paths.tasks / f"{task.worker_id}.md"}
 
-Hard rules:
-1. First validate your task boundary only. Do not edit code yet.
-2. Write validation with this shape:
-   {validation_command}
-3. If anything is ambiguous, overlapping, or risky, write a question with this shape:
-   {question_command}
-4. If validation has no blocking question, wait for approval with:
-   {barrier_wait_command}
-5. Do not implement until this approval barrier exists: {paths.approval_file}
-6. After approval, work only in this worktree: {task.worktree}
-7. If uncertainty appears during implementation, pause only yourself and write a question.
-8. On completion, write handoff with this shape:
-   {handoff_command}
-9. Do not merge or push.
-10. The Codex session is launched with this shared state directory as an additional
-   writable root, so do not ask the user for approval just to write validation,
-   question, approval-check, or handoff files under: {paths.root}
-11. Your Codex approval policy is non-interactive. Do not ask the user to approve
-    ccx validation/question/handoff writes; if a sandboxed command fails, report the
-    exact failure to the conductor and stop.
+Your worktree after approval:
+{task.worktree}
 
-{interrupt_recovery_prompt(config, run_id)}
+Required commands:
+- Write validation:
+  {validation_command}
+- If blocked, write a question:
+  {question_command}
+- Wait for approval:
+  {barrier_wait_command}
+- Write handoff:
+  {handoff_command}
 
 Begin by reading your task file and producing validation.
 """
@@ -1033,9 +1084,20 @@ def write_prompt_files(
         force=config.force_state,
     )
     prompt_paths["conductor"] = conductor_path
+    hard_rules_path = prompt_dir / "hard_rules.md"
+    write_text(
+        hard_rules_path,
+        worker_hard_rules_prompt(config, paths, run_id),
+        force=config.force_state,
+    )
+    prompt_paths["hard_rules"] = hard_rules_path
     for task in plan.tasks:
         path = prompt_dir / f"{task.worker_id}.md"
-        write_text(path, worker_prompt(config, task, paths, run_id), force=config.force_state)
+        write_text(
+            path,
+            worker_prompt(config, task, paths, run_id, hard_rules_path),
+            force=config.force_state,
+        )
         prompt_paths[task.worker_id] = path
     return prompt_paths
 
@@ -1650,6 +1712,18 @@ def apply_worker_launch_metadata(state: dict[str, Any], launch: WorkerLaunch) ->
         worker["surface"] = pane.surface
 
 
+def current_conductor_metadata() -> dict[str, str]:
+    """Return cmux metadata for the current Claude conductor surface when available."""
+    workspace = os.environ.get("CMUX_WORKSPACE_ID", "")
+    surface = os.environ.get("CMUX_SURFACE_ID", "")
+    metadata: dict[str, str] = {}
+    if workspace:
+        metadata["workspace"] = workspace
+    if surface:
+        metadata["surface"] = surface
+    return metadata
+
+
 def watch_runtime(
     repo: Path,
     *,
@@ -2129,6 +2203,7 @@ def run_orchestration(config: RunConfig) -> int:
             "branch": f"ccx/{run_id}/integration",
             "worktree": str(integration_worktree),
         },
+        "conductor": current_conductor_metadata(),
         "models": {
             "claude": config.claude_model,
             "claude_effort": config.claude_effort,
