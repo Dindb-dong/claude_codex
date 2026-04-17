@@ -26,4 +26,8 @@
 
 ## Handoff Path
 
-`.orchestrator/handoffs/<worker-id>.md`
+`.ccx/runs/<run-id>/handoffs/<worker-id>.md`
+
+If shared-state handoff writing is blocked by sandboxing, ccx writes a worker-local fallback under:
+
+`<worker-worktree>/.ccx-local/runs/<run-id>/handoffs/<worker-id>.md`

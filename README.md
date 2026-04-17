@@ -146,9 +146,9 @@ Internal orchestration directories such as `.git`, `.ccx`, `.orchestrator`, and
 If a worker cannot write a question or handoff into the shared run state because
 the Codex sandbox rejects the path, `ccx question` and `ccx handoff` write
 worker-local fallbacks under `.ccx-local/runs/<run-id>/questions/` or
-`.ccx-local/runs/<run-id>/handoffs/`. `ccx status`, `ccx watch`, and `ccx approve`
-count those fallback questions/handoffs so the conductor does not miss blocked or
-completed workers.
+`.ccx-local/runs/<run-id>/handoffs/`. `ccx status` and `ccx watch` count both
+fallback types, and `ccx approve` blocks on fallback questions so the conductor
+does not miss blocked or completed workers.
 
 `Esc` remains a native Claude/Codex interrupt. Since it may not notify ccx, generated prompts include interrupt recovery rules. The conductor may mark a stale interrupted run stopped with `ccx stop --run <run-id>`. Workers only check status and report back; they do not write global stop state from their sandbox. `ccx check-barrier` refuses stopped runs even if `approved.json` already exists.
 
@@ -209,7 +209,7 @@ export CCX_CODEX_EFFORT=medium
 - Each worker owns a separate worktree and a clearly bounded file/module scope.
 - `ccx approve` should notify recorded worker panes; workers also wait on `ccx check-barrier`.
 - `ccx check-barrier` blocks stopped runs even when the approval file exists.
-- `ccx status` and `ccx watch` include worker-local handoff fallbacks.
+- `ccx status` and `ccx watch` include worker-local question and handoff fallbacks.
 - Same-file edits by multiple workers require explicit Claude arbitration.
 - `Ctrl-C` in a launched pane and `ccx stop` mark state stopped by default. They close cmux panes only with `--close-cmux`.
 - `Esc` is recovered by prompt protocol on resume: the conductor stops stale `running` state only when recovering from an explicit user interrupt; workers report stopped state and wait.
@@ -219,9 +219,9 @@ export CCX_CODEX_EFFORT=medium
 
 - `docs/architecture.md`: system model and responsibilities.
 - `docs/workflow.md`: end-to-end operating flow.
-- `prompts/claude-conductor.md`: prompt for the Claude conductor running in the current ccx terminal.
+- `prompts/claude-conductor.md`: human-readable reference for generated conductor prompts.
 - `src/claude_codex/prompts/hard_rules.md`: installed static worker protocol referenced by every worker prompt.
-- `prompts/worker-NN.md`: task-specific prompt for each Codex worker pane.
+- `prompts/codex-worker.md`: human-readable reference for generated worker prompts.
 - `templates/`: task, validation, question, and handoff templates.
 - `src/claude_codex/`: Python CLI implementation.
 - `scripts/install-local.sh`: editable install + Claude command install + doctor.

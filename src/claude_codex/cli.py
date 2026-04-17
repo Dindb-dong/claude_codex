@@ -1156,7 +1156,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--force-state",
         action="store_true",
-        help="overwrite existing .orchestrator files",
+        help="overwrite existing .ccx run state files",
     )
     run_parser.set_defaults(func=command_run)
 
