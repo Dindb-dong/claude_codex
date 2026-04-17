@@ -1328,9 +1328,31 @@ def launch_cmux_workers_in_current_workspace(
     workspace = os.environ.get("CMUX_WORKSPACE_ID") or run_command(
         ["cmux", "current-workspace"], cwd=config.repo, timeout=30
     )
+    panes_output = run_command(
+        ["cmux", "list-panes", "--workspace", workspace],
+        cwd=config.repo,
+        timeout=30,
+    )
+    base_pane = focused_pane_ref(panes_output)
     launched: list[WorkerPane] = []
-    directions = ["right", "down", "right", "down", "right", "down"]
     for index, task in enumerate(plan.tasks):
+        if index == 0:
+            split_target = base_pane
+            direction = "right"
+        elif index == 1:
+            split_target = base_pane
+            direction = "down"
+        elif index == 2 and launched:
+            split_target = launched[0].pane
+            direction = "down"
+        else:
+            split_target = launched[-1].pane if launched else base_pane
+            direction = "down"
+        run_command(
+            ["cmux", "focus-pane", "--workspace", workspace, "--pane", split_target],
+            cwd=config.repo,
+            timeout=30,
+        )
         pane_output = run_command(
             [
                 "cmux",
@@ -1338,7 +1360,7 @@ def launch_cmux_workers_in_current_workspace(
                 "--workspace",
                 workspace,
                 "--direction",
-                directions[index % len(directions)],
+                direction,
             ],
             cwd=config.repo,
             timeout=30,
@@ -1385,6 +1407,12 @@ def launch_cmux_workers_in_current_workspace(
             timeout=30,
         )
         launched.append(WorkerPane(worker_id=task.worker_id, pane=pane, surface=surface))
+    with suppress(CliError):
+        run_command(
+            ["cmux", "focus-pane", "--workspace", workspace, "--pane", base_pane],
+            cwd=config.repo,
+            timeout=30,
+        )
     return WorkerLaunch(workspace=workspace, panes=launched)
 
 

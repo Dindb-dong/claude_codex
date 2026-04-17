@@ -566,27 +566,40 @@ class CliTestCase(unittest.TestCase):
             calls.append(command)
             if command == ["cmux", "current-workspace"]:
                 return "workspace:7"
+            if command[:2] == ["cmux", "list-panes"]:
+                return "* pane:1  [1 surface]  [focused]"
+            if command[:2] == ["cmux", "focus-pane"]:
+                return ""
             if command[:2] == ["cmux", "new-pane"]:
-                return f"pane:{len([call for call in calls if call[:2] == ['cmux', 'new-pane']])}"
+                count = len([call for call in calls if call[:2] == ["cmux", "new-pane"]])
+                return f"pane:{count + 1}"
             if command[:2] == ["cmux", "list-pane-surfaces"]:
-                return "surface:9"
+                pane = command[command.index("--pane") + 1]
+                return f"surface:{pane.split(':')[1]}"
             if command[:2] == ["cmux", "respawn-pane"]:
                 return ""
             raise AssertionError(f"unexpected command: {command}")
 
-        task = WorkerTask(
-            worker_id="worker-01",
-            title="UI update",
-            objective="Implement it.",
-            owned_scope=["src/ui"],
-            non_goals=[],
-            required_tests=[],
-            risks=[],
-            branch="ccx/run/worker-01",
-            worktree=self.repo / "worker-01",
-        )
-        prompt_path = self.repo / "worker-01.md"
-        prompt_path.write_text("worker prompt\n", encoding="utf-8")
+        tasks = []
+        prompt_paths = {}
+        for index in range(1, 4):
+            worker_id = f"worker-{index:02d}"
+            tasks.append(
+                WorkerTask(
+                    worker_id=worker_id,
+                    title=f"Worker {index}",
+                    objective="Implement it.",
+                    owned_scope=["src/ui"],
+                    non_goals=[],
+                    required_tests=[],
+                    risks=[],
+                    branch=f"ccx/run/{worker_id}",
+                    worktree=self.repo / worker_id,
+                )
+            )
+            prompt_path = self.repo / f"{worker_id}.md"
+            prompt_path.write_text("worker prompt\n", encoding="utf-8")
+            prompt_paths[worker_id] = prompt_path
         config = RunConfig(
             repo=self.repo,
             request="make the UI cleaner",
@@ -607,18 +620,32 @@ class CliTestCase(unittest.TestCase):
         ):
             launch = launch_cmux_workers_in_current_workspace(
                 config,
-                Plan(summary="Update UI", worker_count=1, tasks=[task]),
-                {"worker-01": prompt_path},
+                Plan(summary="Update UI", worker_count=3, tasks=tasks),
+                prompt_paths,
                 "run-1",
             )
 
         flattened = [" ".join(command[:2]) for command in calls]
         self.assertEqual(launch.workspace, "workspace:captured")
-        self.assertEqual(launch.panes[0].surface, "surface:9")
+        self.assertEqual([pane.pane for pane in launch.panes], ["pane:2", "pane:3", "pane:4"])
+        self.assertEqual(
+            [pane.surface for pane in launch.panes],
+            ["surface:2", "surface:3", "surface:4"],
+        )
         self.assertNotIn(["cmux", "current-workspace"], calls)
         self.assertNotIn("cmux new-workspace", flattened)
         self.assertIn("cmux new-pane", flattened)
         self.assertIn("cmux respawn-pane", flattened)
+        split_commands = [command for command in calls if command[:2] == ["cmux", "new-pane"]]
+        self.assertEqual(
+            [command[command.index("--direction") + 1] for command in split_commands],
+            ["right", "down", "down"],
+        )
+        focus_commands = [command for command in calls if command[:2] == ["cmux", "focus-pane"]]
+        self.assertEqual(
+            [command[command.index("--pane") + 1] for command in focus_commands],
+            ["pane:1", "pane:1", "pane:2", "pane:1"],
+        )
         respawn_command = next(
             command for command in calls if command[:2] == ["cmux", "respawn-pane"]
         )
