@@ -624,10 +624,12 @@ class CliTestCase(unittest.TestCase):
         self.assertIn("Esc may interrupt Claude/Codex without notifying ccx", conductor_prompt)
         self.assertIn(f"ccx status {resolved_repo} --run {current_run} --json", conductor_prompt)
         self.assertIn(str(installed_hard_rules_path), worker_prompt)
-        self.assertIn("Do not use `@file` prompt", worker_prompt)
+        self.assertIn("Do not use `@file`", worker_prompt)
         self.assertNotIn(f"@{installed_hard_rules_path}", worker_prompt)
         self.assertNotIn(f"ccx stop {resolved_repo} --run {current_run}", worker_prompt)
-        self.assertIn("Do not run `ccx stop` from a worker sandbox", hard_rules_prompt)
+        self.assertIn("ccx-worker-protocol/v1", hard_rules_prompt)
+        self.assertIn("Do not merge, push, or run `ccx stop`", hard_rules_prompt)
+        self.assertLess(len(hard_rules_prompt.split()), 140)
         self.assertIn(f"until ccx check-barrier {resolved_repo} --run {current_run}", worker_prompt)
 
     def test_run_no_conductor_launches_workers_without_nested_claude(self) -> None:

@@ -1087,45 +1087,28 @@ def worker_prompt(
         f"--branch {task.branch} --worktree {task.worktree} "
         '--summary "..."'
     )
-    return f"""You are {task.worker_id}, a Codex worker in a ccx Claude + Codex run.
+    return f"""ccx worker: {task.worker_id}
 
-Target request:
+Protocol: read {hard_rules_path} from disk before acting. Do not use `@file`
+expansion for this installed static protocol.
+
+Request:
 {config.request}
 
-Shared state directory:
-{paths.root}
+Run contract:
+- task: {paths.tasks / f"{task.worker_id}.md"}
+- worktree after approval: {task.worktree}
+- shared state: {paths.root}
+- approval barrier: {paths.approval_file}
+- status after explicit interrupt: {status_command}
 
-Installed common hard rules:
-{hard_rules_path}
+Commands:
+- validation: {validation_command}
+- question: {question_command}
+- wait: {barrier_wait_command}
+- handoff: {handoff_command}
 
-Read that file from disk before doing anything. Do not use `@file` prompt
-expansion for the hard rules; the file is installed with ccx and should be
-opened only as normal local context.
-
-Your task file:
-{paths.tasks / f"{task.worker_id}.md"}
-
-Your worktree after approval:
-{task.worktree}
-
-Run-specific facts:
-- Approval barrier: {paths.approval_file}
-- Shared state directory: {paths.root}
-- This shared state directory is passed as an additional writable root.
-- If resuming after an explicit user interrupt, check status with:
-  {status_command}
-
-Required commands:
-- Write validation:
-  {validation_command}
-- If blocked, write a question:
-  {question_command}
-- Wait for approval:
-  {barrier_wait_command}
-- Write handoff:
-  {handoff_command}
-
-Begin by reading your task file and producing validation.
+Start by reading the protocol and task file, then write validation.
 """
 
 
